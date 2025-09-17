@@ -1,0 +1,5 @@
+# Ignore environment variables
+.env
+
+# Optional: ignore backups or variants
+.env.*

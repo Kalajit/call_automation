@@ -6973,8 +6973,7 @@ agent_config = LangchainAgentConfig(
     provider="groq",
 )
 
-# Create CustomDeepgramTranscriber instance with config
-# custom_deepgram_transcriber = CustomDeepgramTranscriber(transcriber_config)
+
 
 # Telephony Server setup
 telephony_server = TelephonyServer(
@@ -7098,4 +7097,4 @@ if __name__ == "__main__":
     # asyncio.run(start_server_and_call())
 
 
-    run_server()
+    run_server() 

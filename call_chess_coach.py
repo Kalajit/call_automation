@@ -8214,7 +8214,7 @@ async def outbound_call(req: OutboundCallRequest):
         to_phone = normalize_e164(req.to_phone)
         if not to_phone or len(to_phone) < 10:
             raise HTTPException(status_code=400, detail="Invalid phone")
-        sid = await make_outbound_call(to_phone)
+        sid = await make_outbound_call(to_phone, req.call_type, req.lead)
         lead = req.lead or {}
         lead["to_phone"] = to_phone
         LEAD_CONTEXT_STORE[sid] = lead

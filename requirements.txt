@@ -11,3 +11,5 @@ pydantic>=2.7.2,<3.0.0
 langchain
 langchain-community
 vocode[stream_elements]>=0.1.113,<0.2.0  # Added for StreamElementsSynthesizer
+
+pydub>=0.25.1,<0.26.0

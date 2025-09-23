@@ -12134,12 +12134,12 @@ async def outbound_call(req: OutboundCallRequest):
         # NEW: Update telephony server with dynamic agent config for this call
         # telephony_server.inbound_call_configs[0].agent_config = agent_config
 
-        # NEW: Use config_manager to set dynamic agent config for this call
-        config_manager.set_config(to_phone, {
-            "agent_config": agent_config,
-            "synthesizer_config": synthesizer_config,
-            "transcriber_config": transcriber_config
-        })
+        # # NEW: Use config_manager to set dynamic agent config for this call
+        # config_manager.set_config(to_phone, {
+        #     "agent_config": agent_config,
+        #     "synthesizer_config": synthesizer_config,
+        #     "transcriber_config": transcriber_config
+        # })
 
         sid = await make_outbound_call(to_phone, req.call_type, req.lead, req.agent_type, agent_config)
         lead = req.lead or {}
@@ -12189,12 +12189,7 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
         "slots": {},
         "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}]
     })
-    # Ensure config is set for this call
-    config_manager.set_config(call.sid, {
-        "agent_config": agent_config or default_agent_config,
-        "synthesizer_config": synthesizer_config,
-        "transcriber_config": transcriber_config
-    })
+    
     return call.sid
 
 

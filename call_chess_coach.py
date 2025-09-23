@@ -12121,14 +12121,15 @@ def normalize_e164(number: str) -> str:
 @app.post("/outbound_call")
 async def outbound_call(req: OutboundCallRequest):
     try:
-        logger.info(f"Received: agent_type={req.agent_type}, prompt_len={len(req.prompt_preamble)}")
+        logger.info(f"Received: agent_type={req.agent_type}, prompt_preamble={req.prompt_preamble[:50]}...")  # Log first 50 chars
         to_phone = normalize_e164(req.to_phone)
         if not to_phone or len(to_phone) < 10:
             raise HTTPException(status_code=400, detail="Invalid phone")
 
+        # Use the received prompt_preamble directly, overriding any default
         agent_config = LangchainAgentConfig(
             initial_message=BaseMessage(text=req.initial_message),
-            prompt_preamble=req.prompt_preamble,
+            prompt_preamble=req.prompt_preamble,  # Ensure this is used
             model_name="llama-3.1-8b-instant",
             api_key=GROQ_API_KEY,
             provider="groq",
@@ -12139,7 +12140,7 @@ async def outbound_call(req: OutboundCallRequest):
         lead["to_phone"] = to_phone
         lead["agent_type"] = req.agent_type
         LEAD_CONTEXT_STORE[sid] = lead
-        logger.info(f"Call SID={sid}")
+        logger.info(f"Call SID={sid}, agent_type={req.agent_type}")
         if req.transcript_callback_url:
             os.environ["TRANSCRIPT_CALLBACK_URL"] = req.transcript_callback_url
         return {"ok": True, "call_sid": sid}
@@ -12149,7 +12150,6 @@ async def outbound_call(req: OutboundCallRequest):
         logger.error(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     
-
 
 
     

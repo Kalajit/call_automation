@@ -12120,8 +12120,8 @@ def normalize_e164(number: str) -> str:
 # ADDED n8n: HTTP endpoint to start outbound call from n8n
 @app.post("/outbound_call")
 async def outbound_call(req: OutboundCallRequest):
-    logger.info(f"Received payload: {req.dict()}")
     try:
+        logger.info(f"Received: agent_type={req.agent_type}, prompt_len={len(req.prompt_preamble)}")
         to_phone = normalize_e164(req.to_phone)
         if not to_phone or len(to_phone) < 10:
             raise HTTPException(status_code=400, detail="Invalid phone")
@@ -12139,16 +12139,20 @@ async def outbound_call(req: OutboundCallRequest):
         lead["to_phone"] = to_phone
         lead["agent_type"] = req.agent_type
         LEAD_CONTEXT_STORE[sid] = lead
-        logger.info(f"Outbound call requested via n8n: SID={sid}, lead={lead}")
+        logger.info(f"Call SID={sid}")
         if req.transcript_callback_url:
             os.environ["TRANSCRIPT_CALLBACK_URL"] = req.transcript_callback_url
         return {"ok": True, "call_sid": sid}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"/outbound_call failed: {e}")
+        logger.error(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    
 
+
+
+    
 # Outbound call helper
 async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, agent_type: str = "chess_coach", agent_config: AgentConfig = None):
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)

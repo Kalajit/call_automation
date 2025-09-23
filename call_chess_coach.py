@@ -12125,7 +12125,6 @@ async def outbound_call(req: OutboundCallRequest):
         if not to_phone or len(to_phone) < 10:
             raise HTTPException(status_code=400, detail="Invalid phone")
 
-        # Use the initial_message and prompt_preamble directly from the request
         agent_config = LangchainAgentConfig(
             initial_message=BaseMessage(text=req.initial_message),
             prompt_preamble=req.prompt_preamble,
@@ -12148,7 +12147,6 @@ async def outbound_call(req: OutboundCallRequest):
     except Exception as e:
         logger.error(f"/outbound_call failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # Outbound call helper
 async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, agent_type: str = "chess_coach", agent_config: AgentConfig = None):

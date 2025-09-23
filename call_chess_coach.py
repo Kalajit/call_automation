@@ -12162,10 +12162,10 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     twilio_base_url = f"https://{BASE_URL}"
     initial_message = agent_config.initial_message.text if agent_config else {
-        "qualification": telephony_server.inbound_call_configs[0].agent_config.initial_message.text,
+        "qualification": "Hello, this is a default qualification message.",
         "reminder": f"This is a reminder for your demo on {lead.get('demo_date', time.strftime('%Y-%m-%d %H:%M IST', time.localtime(time.time() + 86400)))}. Ready?",
         "payment": f"Payment reminder for ₹500 due by {lead.get('due_date', time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400)))}. Settled?"
-    }.get(call_type, telephony_server.inbound_call_configs[0].agent_config.initial_message.text)
+    }.get(call_type, "Hello, this is a default message.")
     call = await asyncio.get_event_loop().run_in_executor(
         None,
         lambda: client.calls.create(
@@ -12180,17 +12180,23 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
         )
     )
     logger.info(f"Call initiated: SID={call.sid}, type={call_type}, agent_type={agent_type}")
-    if call.sid not in LEAD_CONTEXT_STORE:
-        LEAD_CONTEXT_STORE[call.sid] = {"to_phone": to_phone, "call_type": call_type, "agent_type": agent_type, **(lead or {})}
-    CONVERSATION_STORE.setdefault(call.sid, {
-        "conversation_id": call.sid,
+    if call_sid not in LEAD_CONTEXT_STORE:
+        LEAD_CONTEXT_STORE[call_sid] = {"to_phone": to_phone, "call_type": call_type, "agent_type": agent_type, **(lead or {})}
+    CONVERSATION_STORE.setdefault(call_sid, {
+        "conversation_id": call_sid,
         "updated_at": int(time.time()*1000),
-        "lead": LEAD_CONTEXT_STORE.get(call.sid, {}),
+        "lead": LEAD_CONTEXT_STORE.get(call_sid, {}),
         "slots": {},
-        "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}]
+        "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}],
+        "agent_config": agent_config  # Store the config for the conversation
     })
-    
-    return call.sid
+    # Ensure the agent uses this config (update CustomAgentFactory if needed)
+    return call_sid
+
+# In your CustomAgentFactory (e.g., in telephony_server setup)
+def custom_agent_factory(conversation_id: str):
+    config = CONVERSATION_STORE.get(conversation_id, {}).get("agent_config", default_agent_config)
+    return CustomLangchainAgent(config)
 
 
 

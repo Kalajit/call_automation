@@ -12060,14 +12060,27 @@ telephony_server = TelephonyServer(
 app.include_router(telephony_server.get_router())
 
 
-# NEW: Endpoint to handle Twilio call status callbacks for inbound calls
+# Fix call_status to handle empty JSON
 @app.post("/call_status")
 async def call_status(request: Request):
-    data = await request.json()
-    call_sid = data.get("CallSid")
-    if data.get("CallStatus") == "completed":
-        logger.info(f"Inbound call {call_sid} completed")
-    return {"ok": True}
+    try:
+        body = await request.body()
+        data = await request.json() if body else {}
+        call_sid = data.get("CallSid")
+        status = data.get("CallStatus")
+        logger.info(f"Call status update: SID={call_sid}, Status={status}")
+        if call_sid and call_sid in CONVERSATION_STORE:
+            CONVERSATION_STORE[call_sid]["status"] = status
+            if status in ["completed", "failed", "no-answer", "busy"]:
+                conversation = CONVERSATION_STORE.get(call_sid, {}).get("conversation")
+                if conversation and hasattr(conversation, "terminate"):
+                    await conversation.terminate()  # Use the conversation instance's terminate method
+                else:
+                    logger.warning(f"No conversation or terminate method for SID={call_sid}")
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"/call_status failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # NEW: Endpoint to serve conversation JSON files
@@ -12086,9 +12099,9 @@ class OutboundCallRequest(BaseModel):
     lead: typing.Optional[typing.Dict[str, typing.Any]] = None
     transcript_callback_url: typing.Optional[str] = None
     call_type: str = "qualification"
-    agent_type: str = "chess_coach"  # NEW: Added for dynamic agent selection
-    initial_message: typing.Optional[str] = None  # NEW: Allow custom initial message
-    prompt_preamble: typing.Optional[str] = None  # NEW: Allow custom prompt preamble
+    agent_type: str = "chess_coach"
+    initial_message: str = "Hello, this is a default message."
+    prompt_preamble: str = ""
 
 # ADDED n8n: normalize to E164 basic
 def normalize_e164(number: str) -> str:
@@ -12112,25 +12125,14 @@ async def outbound_call(req: OutboundCallRequest):
         if not to_phone or len(to_phone) < 10:
             raise HTTPException(status_code=400, detail="Invalid phone")
 
-
-        # NEW: Create dynamic agent config for outbound call
+        # Use the initial_message and prompt_preamble directly from the request
         agent_config = LangchainAgentConfig(
-            initial_message=BaseMessage(text=req.initial_message ),
+            initial_message=BaseMessage(text=req.initial_message),
             prompt_preamble=req.prompt_preamble,
             model_name="llama-3.1-8b-instant",
             api_key=GROQ_API_KEY,
             provider="groq",
         )
-
-        # NEW: Update telephony server with dynamic agent config for this call
-        # telephony_server.inbound_call_configs[0].agent_config = agent_config
-
-        # # NEW: Use config_manager to set dynamic agent config for this call
-        # config_manager.set_config(to_phone, {
-        #     "agent_config": agent_config,
-        #     "synthesizer_config": synthesizer_config,
-        #     "transcriber_config": transcriber_config
-        # })
 
         sid = await make_outbound_call(to_phone, req.call_type, req.lead, req.agent_type, agent_config)
         lead = req.lead or {}
@@ -12171,7 +12173,7 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
         )
     )
     logger.info(f"Call initiated: SID={call.sid}, type={call_type}, agent_type={agent_type}")
-    call_sid = call.sid  # Correctly define call_sid from call.sid
+    call_sid = call.sid
     if call_sid not in LEAD_CONTEXT_STORE:
         LEAD_CONTEXT_STORE[call_sid] = {"to_phone": to_phone, "call_type": call_type, "agent_type": agent_type, **(lead or {})}
     CONVERSATION_STORE.setdefault(call_sid, {
@@ -12180,7 +12182,7 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
         "lead": LEAD_CONTEXT_STORE.get(call_sid, {}),
         "slots": {},
         "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}],
-        "agent_config": agent_config  # Store the config for the conversation
+        "agent_config": agent_config
     })
     return call_sid
 

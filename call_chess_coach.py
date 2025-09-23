@@ -12017,9 +12017,10 @@ transcriber_config = DeepgramTranscriberConfig(
     downsampling=1,
 )
 
+# Default config as a fallback
 default_agent_config = LangchainAgentConfig(
-    initial_message=BaseMessage(text="Hello, this is Priya from 4champz, a leading chess coaching service in Bengaluru. Do you have 5-10 minutes to discuss some exciting chess coaching opportunities with schools in Bangalore?"),
-    prompt_preamble=CHESS_COACH_PROMPT_PREAMBLE,
+    initial_message=BaseMessage(text="Hello, this is a default message."),
+    prompt_preamble="",
     model_name="llama-3.1-8b-instant",
     api_key=GROQ_API_KEY,
     provider="groq",
@@ -12112,20 +12113,10 @@ async def outbound_call(req: OutboundCallRequest):
             raise HTTPException(status_code=400, detail="Invalid phone")
 
 
-        # NEW: Create dynamic agent config for outbound call based on agent_type
-        if req.agent_type == "chess_coach":
-            prompt_preamble = CHESS_COACH_PROMPT_PREAMBLE
-        elif req.agent_type == "medical_sales":
-            prompt_preamble = medical_sales_prompt
-        elif req.agent_type == "hospital_receptionist":
-            prompt_preamble = hospital_receptionist_prompt
-        else:
-            prompt_preamble = default_agent_config.prompt_preamble  # Fallback to default
-
         # NEW: Create dynamic agent config for outbound call
         agent_config = LangchainAgentConfig(
-            initial_message=BaseMessage(text=req.initial_message or default_agent_config.initial_message.text),
-            prompt_preamble=req.prompt_preamble or prompt_preamble,
+            initial_message=BaseMessage(text=req.initial_message ),
+            prompt_preamble=req.prompt_preamble,
             model_name="llama-3.1-8b-instant",
             api_key=GROQ_API_KEY,
             provider="groq",

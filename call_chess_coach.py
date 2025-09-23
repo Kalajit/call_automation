@@ -12180,6 +12180,7 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
         )
     )
     logger.info(f"Call initiated: SID={call.sid}, type={call_type}, agent_type={agent_type}")
+    call_sid = call.sid  # Correctly define call_sid from call.sid
     if call_sid not in LEAD_CONTEXT_STORE:
         LEAD_CONTEXT_STORE[call_sid] = {"to_phone": to_phone, "call_type": call_type, "agent_type": agent_type, **(lead or {})}
     CONVERSATION_STORE.setdefault(call_sid, {
@@ -12190,7 +12191,6 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
         "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}],
         "agent_config": agent_config  # Store the config for the conversation
     })
-    # Ensure the agent uses this config (update CustomAgentFactory if needed)
     return call_sid
 
 # In your CustomAgentFactory (e.g., in telephony_server setup)

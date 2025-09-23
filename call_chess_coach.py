@@ -10835,7 +10835,7 @@ import asyncio
 import httpx
 import typing
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 from fastapi import FastAPI, Request, Response
 from fastapi.logger import logger as fastapi_logger
 from contextlib import asynccontextmanager
@@ -12120,6 +12120,7 @@ def normalize_e164(number: str) -> str:
 # ADDED n8n: HTTP endpoint to start outbound call from n8n
 @app.post("/outbound_call")
 async def outbound_call(req: OutboundCallRequest):
+    logger.info(f"Received payload: {req.dict()}")
     try:
         to_phone = normalize_e164(req.to_phone)
         if not to_phone or len(to_phone) < 10:

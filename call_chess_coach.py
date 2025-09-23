@@ -12126,9 +12126,9 @@ async def outbound_call(req: OutboundCallRequest):
         if not to_phone or len(to_phone) < 10:
             raise HTTPException(status_code=400, detail="Invalid phone")
 
-        # Use the received prompt_preamble directly, overriding any default
+        # Use the received prompt_preamble and initial_message directly
         agent_config = LangchainAgentConfig(
-            initial_message=BaseMessage(text=req.initial_message),
+            initial_message=BaseMessage(text=req.initial_message),  # Use provided initial_message
             prompt_preamble=req.prompt_preamble,  # Ensure this is used
             model_name="llama-3.1-8b-instant",
             api_key=GROQ_API_KEY,
@@ -12149,19 +12149,14 @@ async def outbound_call(req: OutboundCallRequest):
     except Exception as e:
         logger.error(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    
 
-
-    
 # Outbound call helper
 async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, agent_type: str = "chess_coach", agent_config: AgentConfig = None):
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     twilio_base_url = f"https://{BASE_URL}"
-    initial_message = agent_config.initial_message.text if agent_config else {
-        "qualification": "Hello, this is a default qualification message.",
-        "reminder": f"This is a reminder for your demo on {lead.get('demo_date', time.strftime('%Y-%m-%d %H:%M IST', time.localtime(time.time() + 86400)))}. Ready?",
-        "payment": f"Payment reminder for ₹500 due by {lead.get('due_date', time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400)))}. Settled?"
-    }.get(call_type, "Hello, this is a default message.")
+    # Use agent_config.initial_message if available, fallback to a minimal default
+    initial_message = agent_config.initial_message.text if agent_config and agent_config.initial_message else \
+                      f"Hello, this is a generic message for {call_type}."  # Minimal fallback
     call = await asyncio.get_event_loop().run_in_executor(
         None,
         lambda: client.calls.create(
@@ -12185,13 +12180,15 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
         "lead": LEAD_CONTEXT_STORE.get(call_sid, {}),
         "slots": {},
         "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}],
-        "agent_config": agent_config
+        "agent_config": agent_config  # Store agent_config for the conversation
     })
     return call_sid
 
 # In your CustomAgentFactory (e.g., in telephony_server setup)
 def custom_agent_factory(conversation_id: str):
     config = CONVERSATION_STORE.get(conversation_id, {}).get("agent_config", default_agent_config)
+    if not config.prompt_preamble:  # Fallback if no config
+        config.prompt_preamble = "Default prompt if none provided."
     return CustomLangchainAgent(config)
 
 

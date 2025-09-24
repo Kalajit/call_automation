@@ -12126,6 +12126,16 @@ async def outbound_call(req: OutboundCallRequest):
         if not to_phone or len(to_phone) < 10:
             raise HTTPException(status_code=400, detail="Invalid phone")
 
+
+        # Dynamically create agent_config based on agent_type
+        prompt_preamble = req.prompt_preamble
+        if not prompt_preamble:
+            prompt_preamble = {
+                "chess_coach": CHESS_COACH_PROMPT_PREAMBLE,
+                "medical_sales": medical_sales_prompt,
+                "hospital_receptionist": hospital_receptionist_prompt
+            }.get(req.agent_type, "")
+
         # Use the received prompt_preamble and initial_message directly
         agent_config = LangchainAgentConfig(
             initial_message=BaseMessage(text=req.initial_message),  # Use provided initial_message
@@ -12134,6 +12144,10 @@ async def outbound_call(req: OutboundCallRequest):
             api_key=GROQ_API_KEY,
             provider="groq",
         )
+
+        # Store the config in config_manager for the call
+        call_sid = f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"  # Unique SID for outbound
+        config_manager.set_config(call_sid, agent_config)
 
         sid = await make_outbound_call(to_phone, req.call_type, req.lead, req.agent_type, agent_config)
         lead = req.lead or {}
@@ -12155,14 +12169,13 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     twilio_base_url = f"https://{BASE_URL}"
     # Use agent_config.initial_message if available, fallback to a minimal default
-    initial_message = agent_config.initial_message.text if agent_config and agent_config.initial_message else \
-                      f"Hello, this is a generic message for {call_type}."  # Minimal fallback
+    initial_message = agent_config.initial_message.text if agent_config and agent_config.initial_message else f"Hello, this is a generic message for {call_type}."
     call = await asyncio.get_event_loop().run_in_executor(
         None,
         lambda: client.calls.create(
             to=to_phone,
             from_=TWILIO_PHONE_NUMBER,
-            url=f"{twilio_base_url}/inbound_call",
+            url=f"{twilio_base_url}/inbound_call?call_sid={call_sid}",  # Pass call_sid as query param
             status_callback=f"{twilio_base_url}/call_status",
             status_callback_method="POST",
             status_callback_event=["initiated", "ringing", "answered", "completed"],
@@ -12186,7 +12199,7 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
 
 # In your CustomAgentFactory (e.g., in telephony_server setup)
 def custom_agent_factory(conversation_id: str):
-    config = CONVERSATION_STORE.get(conversation_id, {}).get("agent_config", default_agent_config)
+    config = config_manager.get_config(conversation_id) or CONVERSATION_STORE.get(conversation_id, {}).get("agent_config", default_agent_config)
     if not config.prompt_preamble:  # Fallback if no config
         config.prompt_preamble = "Default prompt if none provided."
     return CustomLangchainAgent(config)

@@ -11954,13 +11954,14 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
 # Custom Agent Factory
 class CustomAgentFactory:
     def create_agent(self, agent_config: AgentConfig, logger: Optional[logging.Logger] = None) -> BaseAgent:
-        log = logger or globals().get('logger', logging.getLogger(__name__))
+        log = logger or globals().get("logger", logging.getLogger(__name__))
         log.debug("Creating agent with config type: %s", agent_config.type)
         # CHANGED: print the resolved config that TelephonyServer is about to use
         try:
             init_head = getattr(getattr(agent_config, "initial_message", None), "text", "")
             init_head = (init_head or "")[:120]
-            prompt_len = len(getattr(agent_config, "prompt_preamble", "") or "")
+            prompt = getattr(agent_config, "prompt_preamble", "") or ""
+            prompt_len = len(prompt)
             prompt_head = prompt[:120]
             log.info("Factory using -> init_head=%r | prompt_len=%d | prompt_head=%r", init_head, prompt_len, prompt_head)  # CHANGED
         except Exception as e:
@@ -11969,8 +11970,9 @@ class CustomAgentFactory:
         if agent_config.type == "agent_langchain":
             log.debug("Creating CustomLangchainAgent")
             return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
-        log.error(f"Invalid agent config type: {agent_config.type}")
+        log.error("Invalid agent config type: %s", agent_config.type)
         raise Exception(f"Invalid agent config: {agent_config.type}")
+
 
 
 # Custom Synthesizer Factory
@@ -12134,10 +12136,13 @@ def normalize_e164(number: str) -> str:
             n = '+' + n
     return n
 
+
+
 # ADDED n8n: HTTP endpoint to start outbound call from n8n
 @app.post("/outbound_call")
 async def outbound_call(req: OutboundCallRequest):
     try:
+        # CHANGED: richer logging of what arrived from n8n/CSV (safe heads only)
         logger.info(
             "OUTBOUND payload -> agent_type=%s | init_len=%d | init_head=%r | prompt_len=%d | prompt_head=%r",
             req.agent_type,
@@ -12151,15 +12156,12 @@ async def outbound_call(req: OutboundCallRequest):
         if not to_phone or len(to_phone) < 10:
             raise HTTPException(status_code=400, detail="Invalid phone")
 
-
-        # Force CSV/n8n values; no fallback
-        prompt_preamble = req.prompt_preamble
-        if not prompt_preamble or not prompt_preamble.strip():
-            raise HTTPException(status_code=400, detail="prompt_preamble is required (from CSV/n8n)")
-        initial_message = req.initial_message
-        if not initial_message or not initial_message.strip():
-            raise HTTPException(status_code=400, detail="initial_message is required (from CSV/n8n)")
-
+        # Resolve the prompt: prefer CSV input; otherwise fall back by agent_type
+        prompt_preamble = req.prompt_preamble or {
+            "chess_coach": CHESS_COACH_PROMPT_PREAMBLE,
+            "medical_sales": medical_sales_prompt,
+            "hospital_receptionist": hospital_receptionist_prompt,
+        }.get((req.agent_type or "").strip(), "")
 
         # Use the received prompt_preamble and initial_message directly
         agent_config = CustomLangchainAgentConfig(  # CHANGED: use custom config class
@@ -12170,11 +12172,9 @@ async def outbound_call(req: OutboundCallRequest):
             provider="groq",
         )
 
-        # Store the config in config_manager for the call
-        call_key = f"outbound_{int(time.time()*1000)}_{hash(normalize_e164(req.to_phone))}"
-        telephony_server.config_manager.save_config(call_key, agent_config)   # Changed from set_config to save_config
-
-
+        # CHANGED: save config in the SAME manager TelephonyServer reads
+        call_key = f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"  # CHANGED
+        telephony_server.config_manager.save_config(call_key, agent_config)  # CHANGED
 
         logger.info(
             "Saved agent under custom id: %s | agent_type=%s | init_head=%r | prompt_len=%d",
@@ -12182,34 +12182,56 @@ async def outbound_call(req: OutboundCallRequest):
             req.agent_type,
             agent_config.initial_message.text[:120] if agent_config.initial_message else "",
             len(agent_config.prompt_preamble or ""),
-        ) 
+        )  # CHANGED
 
-        sid = await make_outbound_call(to_phone, req.call_type, req.lead, req.agent_type, agent_config, call_sid=call_key)
+        sid = await make_outbound_call(
+            to_phone,
+            req.call_type,
+            req.lead,
+            req.agent_type,
+            agent_config,
+            call_sid=call_key,
+        )
+
         lead = req.lead or {}
         lead["to_phone"] = to_phone
         lead["agent_type"] = req.agent_type
         LEAD_CONTEXT_STORE[sid] = lead
-        logger.info(f"Call SID={sid}, agent_type={req.agent_type}")
+        logger.info("Call SID=%s, agent_type=%s", sid, req.agent_type)
         if req.transcript_callback_url:
             os.environ["TRANSCRIPT_CALLBACK_URL"] = req.transcript_callback_url
         return {"ok": True, "call_sid": sid}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error("Error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+
+
 # Outbound call helper
-async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, agent_type: str = "chess_coach", agent_config: AgentConfig = None, call_sid: str = None):
+async def make_outbound_call(
+    to_phone: str,
+    call_type: str,
+    lead: dict = None,
+    agent_type: str = "chess_coach",
+    agent_config: AgentConfig = None,
+    call_sid: str = None,
+):
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     twilio_base_url = f"https://{BASE_URL}"
+
     # Use agent_config.initial_message if available, fallback to a minimal default
-    initial_message = agent_config.initial_message.text if agent_config and agent_config.initial_message else f"Hello, this is a generic message for {call_type}."
+    initial_message = (
+        agent_config.initial_message.text
+        if agent_config and agent_config.initial_message
+        else f"Hello, this is a generic message for {call_type}."
+    )
     call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
 
-
-    # CHANGED: make sure query has correct key AND '=' sign
-    twiml_url = f"{twilio_base_url}/inbound_call?call_sid={call_sid}" 
+    # CHANGED: make sure query has the correct key AND '=' sign; send both keys for compatibility
+    twiml_url = f"{twilio_base_url}/inbound_call?call_sid={call_sid}&callsid={call_sid}"  # CHANGED
 
     call = await asyncio.get_event_loop().run_in_executor(
         None,
@@ -12222,34 +12244,38 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
             status_callback_event=["initiated", "ringing", "answered", "completed"],
             record=True,
             recording_channels="dual",
-        )
+        ),
     )
-    logger.info(f"Call initiated: SID={call.sid}, type={call_type}, agent_type={agent_type}")
+    logger.info("Call initiated: TwilioSID=%s | type=%s | agent_type=%s", call.sid, call_type, agent_type)
 
-    # CHANGED: also save under Twilio’s real CallSid so TelephonyServer finds the dynamic persona
+    # CHANGED: mirror-save under Twilio’s real CallSid in the SAME manager
     try:
         if agent_config:
             telephony_server.config_manager.save_config(call.sid, agent_config)  # CHANGED
         logger.info(
-            "Mirrored agent for live call lookup: custom_id=%s -> TwilioSID=%s | init_head=%r | prompt_len=%d",
+            "Mirrored agent for live call: custom_id=%s -> TwilioSID=%s | init_head=%r | prompt_len=%d",
             call_sid,
             call.sid,
             agent_config.initial_message.text[:120] if agent_config and agent_config.initial_message else "",
             len(agent_config.prompt_preamble or "") if agent_config else 0,
         )  # CHANGED
     except Exception as e:
-        logger.warning(f"Failed to mirror config/context to Twilio SID {call.sid}: {e}")  # CHANGED
+        logger.warning("Failed to mirror agent under TwilioSID %s: %s", call.sid, e)  # CHANGED
 
+    # Seed local stores for your dashboards (unchanged structure)
     if call_sid not in LEAD_CONTEXT_STORE:
         LEAD_CONTEXT_STORE[call_sid] = {"to_phone": to_phone, "call_type": call_type, "agent_type": agent_type, **(lead or {})}
-    CONVERSATION_STORE.setdefault(call_sid, {
-        "conversation_id": call_sid,
-        "updated_at": int(time.time()*1000),
-        "lead": LEAD_CONTEXT_STORE.get(call_sid, {}),
-        "slots": {},
-        "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}],
-        "agent_config": agent_config  # Store agent_config for the conversation
-    })
+    CONVERSATION_STORE.setdefault(
+        call_sid,
+        {
+            "conversation_id": call_sid,
+            "updated_at": int(time.time() * 1000),
+            "lead": LEAD_CONTEXT_STORE.get(call_sid, {}),
+            "slots": {},
+            "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time() * 1000)}],
+            "agent_config": agent_config,
+        },
+    )
     return call_sid
 
 

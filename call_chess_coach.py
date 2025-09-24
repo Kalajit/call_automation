@@ -13448,6 +13448,14 @@ def outbound_scheduler():
                     asyncio.run(make_outbound_call(lead["phone"], call_type, lead))
                     update_crm(lead["id"], "", {}, {}, "", status="Calling")
         time.sleep(300)  # Poll every 5 minutes
+
+
+
+
+@app.get("/")
+async def root():
+    return {"message": "API is running. Use /outbound_call to trigger calls."}
+
 # Main entrypoint (updated to include scheduler)
 if __name__ == "__main__":
     import uvicorn

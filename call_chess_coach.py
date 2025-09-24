@@ -12583,6 +12583,8 @@ llm = ChatGroq(model_name="llama-3.1-8b-instant")
 # Config Manager
 config_manager = InMemoryConfigManager()
 
+stored_agent_configs: Dict[str, LangchainAgentConfig] = {}
+
 # ADDED for JSON capture with LLM extraction: global in-memory store
 CONVERSATION_STORE: dict = {}  # ADDED for JSON LLM extraction
 
@@ -13306,15 +13308,37 @@ async def get_conversation(call_sid: str):
     raise HTTPException(status_code=404, detail="Conversation not found")
 
 
-# ADDED n8n: request schema for outbound_call
+
+
+# Define a Pydantic Model for agent config input via new endpoint
+class AgentConfigInput(BaseModel):
+    agent_type: str
+    initial_message: str
+    prompt_preamble: str
+
+
+@app.post("/set_agent_config")
+async def set_agent_config(agent_config_input: AgentConfigInput):
+    agent_id = f"agent_{int(time.time()*1000)}"  # create unique agent_id
+    agent_config = LangchainAgentConfig(
+        initial_message=BaseMessage(text=agent_config_input.initial_message),
+        prompt_preamble=agent_config_input.prompt_preamble,
+        model_name="llama-3.1-8b-instant",
+        api_key=os.getenv("GROQ_API_KEY", ""),
+        provider="groq",
+    )
+    stored_agent_configs[agent_id] = agent_config
+    logger.info(f"Stored new agent config under ID {agent_id} for type {agent_config_input.agent_type}")
+    return {"agent_id": agent_id}
+
+
 class OutboundCallRequest(BaseModel):
     to_phone: str
     lead: Optional[Dict[str, Any]] = None
     transcript_callback_url: Optional[str] = None
     call_type: str = "qualification"
-    agent_type: str = "chess_coach"
-    initial_message: str = "Hello, this is a default message."
-    prompt_preamble: str = ""
+    agent_type: Optional[str] = None
+    agent_id: Optional[str] = None  # Accept a stored agent id here
 
 
 
@@ -13336,57 +13360,49 @@ def normalize_e164(number: str) -> str:
 @app.post("/outbound_call")
 async def outbound_call(req: OutboundCallRequest):
     try:
-        logger.info(
-            "OUTBOUND payload -> agent_type=%s | init_len=%d | init_head=%r | prompt_len=%d | prompt_head=%r",
-            req.agent_type,
-            len(req.initial_message or ""),
-            (req.initial_message or "")[:120],
-            len(req.prompt_preamble or ""),
-            (req.prompt_preamble or "")[:120],
-        )
         to_phone = normalize_e164(req.to_phone)
         if not to_phone or len(to_phone) < 10:
             raise HTTPException(status_code=400, detail="Invalid phone")
-        
-        agent_type = req.agent_type.strip()
-        initial_message = req.initial_message.strip()
-        prompt_preamble = req.prompt_preamble.strip()
 
-        agent_config = LangchainAgentConfig(
-            initial_message=BaseMessage(text=initial_message),
-            prompt_preamble=prompt_preamble,
-            model_name="llama-3.1-8b-instant",
-            api_key=GROQ_API_KEY,
-            provider="groq",
-        )
-
+        if req.agent_id:
+            agent_config = stored_agent_configs.get(req.agent_id)
+            if not agent_config:
+                raise HTTPException(status_code=404, detail="Agent config not found")
+            logger.info(f"Using stored agent config by id {req.agent_id}")
+        else:
+            # fallback to build agent dynamically if no agent_id provided
+            agent_config = LangchainAgentConfig(
+                initial_message=BaseMessage(text=req.agent_type or "Hello, this is a default message."),
+                prompt_preamble="",
+                model_name="llama-3.1-8b-instant",
+                api_key=os.getenv("GROQ_API_KEY", ""),
+                provider="groq",
+            )
 
         call_key = f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
 
-        # CHANGED: await save to shared config_manager singleton for consistency
         res = config_manager.save_config(call_key, agent_config)
         if asyncio.iscoroutine(res):
             await res
 
-        logger.info(f"Saved agent under call_key {call_key} with init_message head: {initial_message[:120]}")
+        logger.info(f"Saved agent under call_key {call_key}")
 
-
-
-        sid = await make_outbound_call(to_phone, req.call_type, req.lead, agent_type, agent_config, call_sid=call_key)
+        sid = await make_outbound_call(to_phone, req.call_type, req.lead, req.agent_type, agent_config, call_sid=call_key)
 
         lead = req.lead or {}
         lead["to_phone"] = to_phone
         LEAD_CONTEXT_STORE[sid] = lead
         logger.info(f"Outbound call requested via n8n: SID={sid}, lead={lead}")
+
         if req.transcript_callback_url:
             os.environ["TRANSCRIPT_CALLBACK_URL"] = req.transcript_callback_url
+
         return {"ok": True, "call_sid": sid}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"/outbound_call failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # Outbound call helper
 async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_type: str, agent_config: AgentConfig, call_sid: str = None):

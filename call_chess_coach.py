@@ -12147,7 +12147,7 @@ async def outbound_call(req: OutboundCallRequest):
 
         # Store the config in config_manager for the call
         call_sid = f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"  # Unique SID for outbound
-        config_manager.set_config(call_sid, agent_config)
+        config_manager.save_config(call_sid, agent_config)  # Changed from set_config to save_config
 
         sid = await make_outbound_call(to_phone, req.call_type, req.lead, req.agent_type, agent_config)
         lead = req.lead or {}

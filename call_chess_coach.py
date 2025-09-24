@@ -13397,7 +13397,8 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
 
     call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
 
-    twiml_url = f"{twilio_base_url}/inbound_call?call_sid={call_sid}"
+    twiml_url = f"https://call-automation-kxow.onrender.com/inbound_call?call_sid={call_sid}"
+
 
 
     call = await asyncio.get_event_loop().run_in_executor(

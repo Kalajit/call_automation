@@ -11358,6 +11358,7 @@ llm = ChatGroq(model_name="llama-3.1-8b-instant")
 
 # Config Manager
 config_manager = InMemoryConfigManager()
+shared_config_manager = InMemoryConfigManager()  # CHANGED
 
 # ADDED for JSON capture with LLM extraction: global in-memory store
 CONVERSATION_STORE: dict = {}  # ADDED for JSON LLM extraction
@@ -11960,7 +11961,7 @@ class CustomAgentFactory:
             init_head = getattr(getattr(agent_config, "initial_message", None), "text", "")
             init_head = (init_head or "")[:120]
             prompt_len = len(getattr(agent_config, "prompt_preamble", "") or "")
-            prompt_head = (getattr(agent_config, "prompt_preamble", "") or "")[:120]
+            prompt_head = prompt[:120]
             log.info("Factory using -> init_head=%r | prompt_len=%d | prompt_head=%r", init_head, prompt_len, prompt_head)  # CHANGED
         except Exception as e:
             log.warning("Factory logging failed: %s", e)  # CHANGED
@@ -12047,9 +12048,11 @@ telephony_server = TelephonyServer(
         TwilioInboundCallConfig(
             url="/inbound_call",
             twilio_config=twilio_config,
+            config_manager=shared_config_manager, 
             agent_config=default_agent_config,  # NEW: Use default for inbound calls
             synthesizer_config=synthesizer_config,
             transcriber_config=transcriber_config,  # Use instance
+            agent_factory=CustomAgentFactory(),
             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
@@ -12161,26 +12164,27 @@ async def outbound_call(req: OutboundCallRequest):
         # Use the received prompt_preamble and initial_message directly
         agent_config = CustomLangchainAgentConfig(  # CHANGED: use custom config class
             initial_message=BaseMessage(text=req.initial_message or "Hello, this is a default message."),  # CHANGED
-            prompt_preamble=prompt_preamble,  # CHANGED: use resolved preamble (req or fallback)
+            prompt_preamble=prompt_preamble,  # CHANGED
             model_name="llama-3.1-8b-instant",
             api_key=GROQ_API_KEY,
             provider="groq",
         )
 
         # Store the config in config_manager for the call
-        call_sid = f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"  # Unique SID for outbound
-        config_manager.save_config(call_sid, agent_config)  # Changed from set_config to save_config
+        call_key = f"outbound_{int(time.time()*1000)}_{hash(normalize_e164(req.to_phone))}"
+        telephony_server.config_manager.save_config(call_key, agent_config)   # Changed from set_config to save_config
 
 
 
         logger.info(
-            "Saved agent under custom id: %s | init_head=%r | prompt_len=%d",
-            call_sid,
+            "Saved agent under custom id: %s | agent_type=%s | init_head=%r | prompt_len=%d",
+            call_key,
+            req.agent_type,
             agent_config.initial_message.text[:120] if agent_config.initial_message else "",
             len(agent_config.prompt_preamble or ""),
         ) 
 
-        sid = await make_outbound_call(to_phone, req.call_type, req.lead, req.agent_type, agent_config, call_sid=call_sid)
+        sid = await make_outbound_call(to_phone, req.call_type, req.lead, req.agent_type, agent_config, call_sid=call_key)
         lead = req.lead or {}
         lead["to_phone"] = to_phone
         lead["agent_type"] = req.agent_type
@@ -12202,12 +12206,17 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
     # Use agent_config.initial_message if available, fallback to a minimal default
     initial_message = agent_config.initial_message.text if agent_config and agent_config.initial_message else f"Hello, this is a generic message for {call_type}."
     call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
+
+
+    # CHANGED: make sure query has correct key AND '=' sign
+    twiml_url = f"{twilio_base_url}/inbound_call?call_sid={call_sid}" 
+
     call = await asyncio.get_event_loop().run_in_executor(
         None,
         lambda: client.calls.create(
             to=to_phone,
             from_=TWILIO_PHONE_NUMBER,
-            url=f"{twilio_base_url}/inbound_call?call_sid={call_sid}",  # Pass call_sid as query param
+            url=twiml_url,
             status_callback=f"{twilio_base_url}/call_status",
             status_callback_method="POST",
             status_callback_event=["initiated", "ringing", "answered", "completed"],
@@ -12220,7 +12229,7 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
     # CHANGED: also save under Twilio’s real CallSid so TelephonyServer finds the dynamic persona
     try:
         if agent_config:
-            config_manager.save_config(call.sid, agent_config)  # CHANGED
+            telephony_server.config_manager.save_config(call.sid, agent_config)  # CHANGED
         logger.info(
             "Mirrored agent for live call lookup: custom_id=%s -> TwilioSID=%s | init_head=%r | prompt_len=%d",
             call_sid,

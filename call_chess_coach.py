@@ -12353,6 +12353,7 @@ import asyncio
 import httpx
 import typing
 import time
+from xml.etree.ElementTree import Element, tostring
 from typing import Optional, Tuple, Any, Dict
 from fastapi import FastAPI, Request, Response
 from fastapi.logger import logger as fastapi_logger
@@ -13407,13 +13408,17 @@ async def outbound_call(req: OutboundCallRequest):
 # Outbound call helper
 async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_type: str, agent_config: AgentConfig, call_sid: str = None):
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    twilio_phone = TWILIO_PHONE_NUMBER
     twilio_base_url = f"https://{BASE_URL}"
     
-    initial_message = agent_config.initial_message.text if agent_config.initial_message else f"Hello, this is a generic message for {call_type}."
+    # Default fallback message
+    initial_message = agent_config.initial_message.text if agent_config.initial_message else "Hello, this is a default message."
 
+    # Generate unique call_sid if needed
     call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
 
-    twiml_url = f"https://call-automation-kxow.onrender.com/inbound_call?call_sid={call_sid}"
+    # Pass call_sid in URL for inbound webhook
+    twiml_url = f"{twilio_base_url}/inbound_call?call_sid={call_sid}"
 
 
 
@@ -13439,6 +13444,12 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
     logger.info(f"Mirrored agent save: custom_id={call_sid} -> TwilioSID={call.sid} with init_message head: {agent_config.initial_message.text[:120]}")
 
 
+    # Store lead and conversation data in your stores (existing)
+    if call.sid not in LEAD_CONTEXT_STORE:
+        LEAD_CONTEXT_STORE[call.sid] = {"to_phone": to_phone, "call_type": call_type, **(lead or {})}
+
+
+
     if call.sid not in LEAD_CONTEXT_STORE:
         LEAD_CONTEXT_STORE[call.sid] = {"to_phone": to_phone, "call_type": call_type, **(lead or {})}
     CONVERSATION_STORE.setdefault(call.sid, {
@@ -13449,6 +13460,32 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
         "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}]
     })
     return call.sid
+
+
+
+
+
+
+
+@app.post("/inbound_call")
+async def inbound_call(request: Request):
+    call_sid = request.query_params.get("call_sid")
+    agent_config = await config_manager.get_config(call_sid)
+    if agent_config is None:
+        logger.warning(f"No agent config found for call_sid: {call_sid}, using default message.")
+        initial_message = "Hello, this is the default message."
+    else:
+        initial_message = agent_config.initial_message.text
+        logger.info(f"Loaded agent config for call_sid: {call_sid} - Initial message: {initial_message[:120]}")
+    
+    # Create TwiML response dynamically with <Say>
+    response_el = Element('Response')
+    say_el = Element('Say')
+    say_el.text = initial_message
+    response_el.append(say_el)
+
+    twiml_str = tostring(response_el)
+    return Response(content=twiml_str, media_type="application/xml")
 
 
 

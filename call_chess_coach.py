@@ -12064,17 +12064,20 @@ app.include_router(telephony_server.get_router())
 @app.post("/call_status")
 async def call_status(request: Request):
     try:
-        body = await request.body()
-        data = await request.json() if body else {}
-        call_sid = data.get("CallSid")
-        status = data.get("CallStatus")
-        logger.info(f"Call status update: SID={call_sid}, Status={status}")
+        # CHANGED: Twilio sends application/x-www-form-urlencoded by default
+        form = await request.form()  # CHANGED
+        call_sid = form.get("CallSid")  # CHANGED
+        status = form.get("CallStatus")  # CHANGED
+        recording_sid = form.get("RecordingSid")  # CHANGED (optional)
+        recording_url = form.get("RecordingUrl")  # CHANGED (optional)
+        logger.info(f"Call status update: SID={call_sid}, Status={status}, RecSid={recording_sid}, RecUrl={recording_url}")  # CHANGED
+
         if call_sid and call_sid in CONVERSATION_STORE:
             CONVERSATION_STORE[call_sid]["status"] = status
             if status in ["completed", "failed", "no-answer", "busy"]:
                 conversation = CONVERSATION_STORE.get(call_sid, {}).get("conversation")
                 if conversation and hasattr(conversation, "terminate"):
-                    await conversation.terminate()  # Use the conversation instance's terminate method
+                    await conversation.terminate()
                 else:
                     logger.warning(f"No conversation or terminate method for SID={call_sid}")
         return {"ok": True}
@@ -12137,9 +12140,9 @@ async def outbound_call(req: OutboundCallRequest):
             }.get(req.agent_type, "")
 
         # Use the received prompt_preamble and initial_message directly
-        agent_config = LangchainAgentConfig(
-            initial_message=BaseMessage(text=req.initial_message),  # Use provided initial_message
-            prompt_preamble=req.prompt_preamble,  # Ensure this is used
+        agent_config = CustomLangchainAgentConfig(  # CHANGED: use custom config class
+            initial_message=BaseMessage(text=req.initial_message or "Hello, this is a default message."),  # CHANGED
+            prompt_preamble=prompt_preamble,  # CHANGED: use resolved preamble (req or fallback)
             model_name="llama-3.1-8b-instant",
             api_key=GROQ_API_KEY,
             provider="groq",
@@ -12149,7 +12152,7 @@ async def outbound_call(req: OutboundCallRequest):
         call_sid = f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"  # Unique SID for outbound
         config_manager.save_config(call_sid, agent_config)  # Changed from set_config to save_config
 
-        sid = await make_outbound_call(to_phone, req.call_type, req.lead, req.agent_type, agent_config, call_sid)
+        sid = await make_outbound_call(to_phone, req.call_type, req.lead, req.agent_type, agent_config, call_sid=call_sid)
         lead = req.lead or {}
         lead["to_phone"] = to_phone
         lead["agent_type"] = req.agent_type

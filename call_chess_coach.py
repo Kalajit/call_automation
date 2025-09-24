@@ -12149,7 +12149,7 @@ async def outbound_call(req: OutboundCallRequest):
         call_sid = f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"  # Unique SID for outbound
         config_manager.save_config(call_sid, agent_config)  # Changed from set_config to save_config
 
-        sid = await make_outbound_call(to_phone, req.call_type, req.lead, req.agent_type, agent_config)
+        sid = await make_outbound_call(to_phone, req.call_type, req.lead, req.agent_type, agent_config, call_sid)
         lead = req.lead or {}
         lead["to_phone"] = to_phone
         lead["agent_type"] = req.agent_type
@@ -12165,11 +12165,12 @@ async def outbound_call(req: OutboundCallRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # Outbound call helper
-async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, agent_type: str = "chess_coach", agent_config: AgentConfig = None):
+async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, agent_type: str = "chess_coach", agent_config: AgentConfig = None, call_sid: str = None):
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     twilio_base_url = f"https://{BASE_URL}"
     # Use agent_config.initial_message if available, fallback to a minimal default
     initial_message = agent_config.initial_message.text if agent_config and agent_config.initial_message else f"Hello, this is a generic message for {call_type}."
+    call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"  # Use provided call_sid or generate a new one
     call = await asyncio.get_event_loop().run_in_executor(
         None,
         lambda: client.calls.create(
@@ -12184,7 +12185,7 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
         )
     )
     logger.info(f"Call initiated: SID={call.sid}, type={call_type}, agent_type={agent_type}")
-    call_sid = call.sid
+    # call_sid = call.sid
     if call_sid not in LEAD_CONTEXT_STORE:
         LEAD_CONTEXT_STORE[call_sid] = {"to_phone": to_phone, "call_type": call_type, "agent_type": agent_type, **(lead or {})}
     CONVERSATION_STORE.setdefault(call_sid, {

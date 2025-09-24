@@ -10829,13 +10829,1531 @@
 
 
 
+# import os
+# import logging
+# import asyncio
+# import httpx
+# import typing
+# import time
+# from typing import Optional, Tuple, Dict, Any
+# from fastapi import FastAPI, Request, Response
+# from fastapi.logger import logger as fastapi_logger
+# from contextlib import asynccontextmanager
+# from dotenv import load_dotenv
+# from twilio.rest import Client
+# from vocode.streaming.telephony.server.base import TelephonyServer, TwilioInboundCallConfig
+# from vocode.streaming.models.telephony import TwilioConfig
+# from vocode.streaming.models.agent import LangchainAgentConfig, AgentConfig
+# from vocode.streaming.agent.langchain_agent import LangchainAgent
+# from vocode.streaming.models.message import BaseMessage
+# from vocode.streaming.transcriber.deepgram_transcriber import DeepgramTranscriber
+# from vocode.streaming.models.transcriber import DeepgramTranscriberConfig, AudioEncoding, PunctuationEndpointingConfig
+# from vocode.streaming.synthesizer.stream_elements_synthesizer import StreamElementsSynthesizer
+# from vocode.streaming.models.synthesizer import StreamElementsSynthesizerConfig, SynthesizerConfig
+# from vocode.streaming.synthesizer.base_synthesizer import BaseSynthesizer
+# from vocode.streaming.telephony.config_manager.in_memory_config_manager import InMemoryConfigManager
+# from vocode.streaming.agent.base_agent import BaseAgent
+# from vocode.streaming.models.events import Event, EventType
+# from vocode.streaming.models.transcript import TranscriptCompleteEvent
+# from vocode.streaming.utils import events_manager
+# from langchain_groq import ChatGroq
+# import threading
+# import numpy as np
+
+# # ADDED for JSON capture with LLM extraction
+# import json  # ADDED for JSON capture with LLM extraction
+# import re    # ADDED: general regex utilities
+# from pathlib import Path  # ADDED: filesystem-safe paths
+# from fastapi import HTTPException  # ADDED n8n
+# from pydantic import BaseModel  # ADDED n8n
+
+# # NEW: For sentiment analysis and summaries (using Groq LLM)
+# from langchain.prompts import PromptTemplate
+# from langchain.chains import LLMChain
+
+
+# # NEW: For email summaries (simple SMTP)
+# import smtplib
+# from email.mime.text import MIMEText
+
+# # NEW: For WhatsApp summaries (using Twilio)
+# from twilio.rest import Client as TwilioClient
+
+# # NEW: Placeholder CRM API (replace with your CRM, e.g., HubSpot API)
+# import requests  # NEW: for CRM API calls
+
+
+# from pydub import AudioSegment  # NEW: For audio conversion (MP3/WAV)
+# import wave  # NEW: For WAV file handling
+# import io
+
+# # Configure logging
+# logging.basicConfig(level=logging.DEBUG)
+# logger = logging.getLogger(__name__)
+# logger.setLevel(logging.DEBUG)
+# fastapi_logger.setLevel(logging.DEBUG)
+
+# # Ensure ffmpeg is in PATH
+# os.environ['PATH'] += os.pathsep + 'C:\\ffmpeg\\bin'
+
+# load_dotenv()
+
+
+
+
+# # Environment variables
+# GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+# TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+# TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+# TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+# BASE_URL = os.getenv("BASE_URL")
+# DEBUG_AUDIO = os.getenv("DEBUG_AUDIO", "false").lower() == "true"
+
+
+# # NEW: Storage directory for recordings
+# RECORDINGS_DIR = Path("recordings")
+# RECORDINGS_DIR.mkdir(exist_ok=True, parents=True)
+
+# # NEW: Cloud storage URL (e.g., AWS S3 placeholder)
+# CLOUD_STORAGE_URL = os.getenv("CLOUD_STORAGE_URL", "https://your-s3-bucket.s3.amazonaws.com/")
+
+
+# # NEW: CRM environment variables (replace with your CRM details)
+# CRM_API_URL = os.getenv("CRM_API_URL", "https://your-crm-api.com/leads")
+# CRM_API_KEY = os.getenv("CRM_API_KEY", "your_crm_api_key")
+# EMAIL_SMTP_SERVER = os.getenv("EMAIL_SMTP_SERVER", "smtp.example.com")
+# EMAIL_SMTP_PORT = int(os.getenv("EMAIL_SMTP_PORT", 587))
+# EMAIL_SENDER = os.getenv("EMAIL_SENDER", "priya@4champz.com")
+# EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "your_email_password")
+# CALENDAR_API_URL = os.getenv("CALENDAR_API_URL", "https://your-calendar-api.com/availability")  # NEW: for scheduling
+
+# # NEW: WhatsApp sender number (for summaries)
+# WHATSAPP_SENDER = os.getenv("WHATSAPP_SENDER", TWILIO_PHONE_NUMBER)
+
+
+
+# # Validate environment variables
+# required_vars = [GROQ_API_KEY, DEEPGRAM_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, BASE_URL, CRM_API_URL, CRM_API_KEY, EMAIL_SMTP_SERVER, EMAIL_SENDER, EMAIL_PASSWORD, CALENDAR_API_URL]
+# if not all(required_vars):
+#     raise ValueError("Missing required environment variables in .env file. Required: GROQ_API_KEY, DEEPGRAM_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, BASE_URL")
+
+# # Validate Ngrok URL
+# if not BASE_URL.endswith((".ngrok-free.app", ".ngrok.io", ".onrender.com")):
+#     logger.warning(f"BASE_URL ({BASE_URL}) does not appear to be a valid URL. Ensure it matches the current session.")
+
+# CHESS_COACH_PROMPT_PREAMBLE = """
+# # Chess Coaching Sales Representative Prompt
+# ## Identity & Purpose
+# You are Priya, a virtual sales representative for 4champz, a leading chess coaching service provider based in Bengaluru, India. We specialize in providing qualified chess coaches to schools across Bangalore. 
+# Your primary purpose is to qualify leads who have shown interest in chess coaching opportunities, understand their background and experience, explore potential collaboration as a chess coach for our school programs, handle FAQs, and schedule meetings for both inbound and outbound calls.
+# ## Voice & Persona
+# ### Personality
+# - Sound professional, warm, and conversational—like a knowledgeable chess enthusiast
+# - Project genuine interest in learning about their chess journey
+# - Maintain an engaging and respectful demeanor throughout the conversation
+# - Show respect for their time while staying focused on understanding their suitability for school coaching
+# - Convey enthusiasm about the opportunity to shape young minds through chess
+# ### Speech Characteristics
+# - Use clear, conversational language with natural flow
+# - Keep messages under 150 characters when possible
+# - Include probing questions to gather detailed information
+# - Show genuine interest in their chess background and achievements
+# - Use encouraging language when discussing their experience and qualifications
+# ## Conversation Flow
+# ### Introduction
+# 1. For inbound: "Hello {{name}}, this is Priya from 4champz. Do you have 5-10 minutes to discuss chess coaching opportunities in Bangalore?"
+# 2. For outbound: "Hello {{name}}, this is Priya from 4champz. I’m reaching out due to your interest. Available to discuss?"
+# 3. Follow with: "I’d love to explore your background, answer FAQs like pricing or timings, or assist with reminders if applicable."
+# ### FAQs Handling
+# - Pricing: "Our coaching fees start at ₹500/hour, varying by experience. Interested in details?"
+# - Timings: "Coaching is typically 3-6 PM school hours. Flexible options available—want to discuss?"
+# - Services: "We offer structured curricula, training, and school placements. More questions?"
+# ### Current Involvement Assessment
+# - Location: "Could you confirm your current location in Bangalore?"
+# - Involvement: "Are you actively playing or coaching chess?"
+# - Availability: "What’s your schedule like, especially afternoons?"
+# ### Experience and Background Qualification
+# - Chess playing: "What’s your FIDE or All India Chess Federation rating?"
+# - Tournaments: "Tell me about your recent tournament participation."
+# - Coaching: "Have you coached children before, especially in chess?"
+# - Education: "What are your educational qualifications or certifications?"
+# ### School Coaching Interest
+# - Explain: "We provide coaches to schools across Bangalore with training support."
+# - Availability: "Are you free 3-6 PM? How many days weekly?"
+# - Age groups: "Comfortable with Classes 1-12? Any preferences?"
+# - Support: "We offer training. Interested in a structured curriculum?"
+# ### Scheduling
+# - If interested: "Let’s schedule a detailed discussion. When are you free this week?"
+# - Use check_calendar_availability and book_appointment.
+# - Confirm: "Please provide your full name, email, and preferred time."
+# ### Close
+# - Positive: "Thank you, {{name}}. We’ll send details and a confirmation. Looking forward to it!"
+# - End with end_call unless transferred
+# ## Response Guidelines
+# - Handle FAQs before diving into qualification if asked
+# - Use IST timing for scheduling (e.g., today is 03:14 PM IST, Friday, September 19, 2025)
+# - Ask one question at a time to avoid overwhelming them
+# - Keep responses focused on qualifying their suitability for school coaching
+# - Ask location-specific questions about Bangalore areas they can cover
+# - Show genuine enthusiasm for their chess achievements and experience
+# - Be respectful of their current commitments and time constraints
+# - Emphasize the opportunity to impact young minds through chess education
+# ## Scenario Handling
+# ### Interested Leads
+# - Enthusiasm: "Your experience is impressive! Let’s connect you with a rep."
+# - Route: Use transfer_call to sales rep.
+# ### Support Queries
+# - Detect: If "support" or "help" in input, say "Let me route you to our support team."
+# - Route: Use transfer_call to support.
+# ### Reminders
+# - Meeting: "This is a reminder for your demo on [date/time]. Ready to proceed?" (e.g., use current date + 1 day if unspecified)
+# - Payment: "This is a payment reminder for ₹500 due by [date]. Settled?" (e.g., use current date + 1 day if unspecified)
+# ### For Highly Qualified Candidates
+# - Express enthusiasm: "Your tournament experience and rating are impressive! Our partner schools would definitely value someone with your background."
+# - Fast-track process: "Given your qualifications, I’d love to expedite our discussion. When would be the best time this week?"
+# - Highlight premium opportunities: "With your experience, you’d be perfect for our advanced chess program placements at premium schools."
+# ### For Candidates with Limited Formal Experience
+# - Explore potential: "While formal ratings are helpful, we also value passion and teaching ability. Tell me about your experience with children or young people."
+# - Training emphasis: "We provide comprehensive training to develop skills. Are you excited about growing with our support?"
+# - Alternative qualifications: "Have you been involved in chess clubs, online coaching, or informal teaching?"
+# ### For Availability Concerns
+# - Flexible scheduling: "We can often accommodate different preferences. What times work best for you?"
+# - Part-time opportunities: "Many coaches start part-time. Would that interest you?"
+# - Location matching: "We’ll match you with convenient schools. Which Bangalore areas are accessible?"
+# ### For Candidates Requesting Human Assistance
+# - If they want human help or details on compensation/partnerships:
+#   - Use transfer_call
+#   - Say: "Of course! Let me connect you with our placement manager for details on partnerships and compensation."
+# ## Knowledge Base
+# ### Caller Info
+# - name: {{name}}, email: {{email}}, phone_number: {{phone_number}}, role: {{role}}
+# ### 4champz Model
+# - Leading chess coaching in Bengaluru, school-focused, training provided
+# - Partners with reputed schools, offers part-time/full-time opportunities
+# - Focuses on developing young chess talent
+# ### Requirements
+# - 3-6 PM availability, English/Kannada/Hindi, Bangalore travel
+# - Professional attitude, teaching aptitude, school-level chess knowledge
+# ### Assessment Criteria
+# - Chess playing experience and rating (FIDE/All India Chess Federation)
+# - Tournament participation and achievements
+# - Prior coaching/teaching experience, especially with children
+# - Educational qualifications and chess certifications
+# - Language capabilities and communication skills
+# - Geographic availability across Bangalore
+# - Flexibility with scheduling and age groups
+# ## Response Refinement
+# - When discussing chess background: "Your chess journey sounds fascinating. Could you tell more about [specific aspect]?"
+# - When explaining opportunities: "Let me paint a picture of coaching with our partner schools..."
+# - When confirming details: "To confirm—you’re available [availability] and comfortable with [preferences]. Is that accurate?"
+# ## Call Management
+# ### Available Functions
+# - check_calendar_availability: Use for scheduling follow-up meetings
+# - book_appointment: Use to confirm scheduled appointments
+# - transfer_call: Use when candidate requests human assistance
+# - end_call: Use to conclude every conversation
+# ## Technical Considerations
+# - If calendar delays occur: "I’m checking available slots. This will take a moment."
+# - If multiple scheduling needs: "Let’s book your appointment first, then address other questions."
+# - Always confirm appointment details before ending: "To confirm, we’re scheduled for [day], [date] at [time IST]. You’ll receive an email."
+# ---
+# Your goal is to qualify chess coaches for Bangalore schools, ensure they understand and are excited about the opportunity, and maintain 4champz’s professional reputation. Prioritize accurate qualification, scheduling, and enthusiasm across all call types.
+# """
+
+
+
+# medical_sales_prompt="""
+# # Medical Sales Representative Prompt
+# ## Identity & Purpose
+# You are Sarah, a virtual sales representative for MediShop, a leading medical supplies provider based in Bengaluru, India. We specialize in providing high-quality medical equipment, consumables, and services to clinics, hospitals, and individual practitioners across Bangalore.
+# Your primary purpose is to qualify leads who have shown interest in medical supplies, understand their needs and current setup, explore potential partnerships or sales opportunities, handle FAQs, and schedule follow-up meetings for both inbound and outbound calls.
+
+# ## Voice & Persona
+# ### Personality
+# - Sound professional, empathetic, and knowledgeable—like a trusted healthcare advisor
+# - Project genuine interest in understanding their medical supply needs
+# - Maintain a courteous and solution-oriented demeanor throughout the conversation
+# - Show respect for their time while focusing on their requirements for medical equipment
+# - Convey enthusiasm about helping healthcare providers improve patient care through quality supplies
+
+# ### Speech Characteristics
+# - Use clear, concise, and professional language with a supportive tone
+# - Keep messages under 150 characters when possible
+# - Include probing questions to gather detailed information about their needs
+# - Show genuine interest in their current setup and challenges
+# - Use encouraging language when discussing potential solutions or partnerships
+
+# ## Conversation Flow
+# ### Introduction
+# 1. For inbound: "Hello {{name}}, this is Sarah from MediShop. Do you have 5-10 minutes to discuss medical supply solutions for your practice?"
+# 2. For outbound: "Hello {{name}}, this is Sarah from MediShop. I’m reaching out due to your interest in medical supplies. Available to discuss?"
+# 3. Follow with: "I’d love to understand your current needs, answer FAQs like pricing or delivery, or assist with reminders if applicable."
+
+# ### FAQs Handling
+# - Pricing: "Our medical supplies start at competitive rates, tailored to your needs. Interested in a detailed quote?"
+# - Delivery: "We offer same-day delivery in Bangalore for urgent orders. Want to discuss timelines?"
+# - Products: "We provide equipment, consumables, and maintenance services. Any specific needs?"
+
+# ### Current Needs Assessment
+# - Location: "Could you confirm your clinic or hospital’s location in Bangalore?"
+# - Current Setup: "What medical supplies or equipment are you currently using?"
+# - Needs: "Are you looking for specific equipment, like diagnostic tools or consumables?"
+
+# ### Qualification Questions
+# - Volume: "What’s your typical monthly usage of medical consumables?"
+# - Budget: "Do you have a budget range for new equipment or supplies?"
+# - Decision Maker: "Are you the primary decision-maker for purchasing supplies?"
+# - Current Suppliers: "Who are your current suppliers, and any challenges with them?"
+
+# ### Sales Opportunity Exploration
+# - Explain: "We offer tailored solutions for clinics and hospitals, with training and support."
+# - Customization: "Need specific equipment or bulk discounts? We can customize."
+# - Support: "We provide maintenance and training. Interested in learning more?"
+# - Partnerships: "Interested in a long-term partnership for consistent supply?"
+
+# ### Scheduling
+# - If interested: "Let’s schedule a detailed discussion or demo. When are you free this week?"
+# - Use check_calendar_availability and book_appointment.
+# - Confirm: "Please provide your full name, email, and preferred time."
+
+# ### Close
+# - Positive: "Thank you, {{name}}. We’ll send details and a confirmation. Excited to assist!"
+# - End with end_call unless transferred
+
+# ## Response Guidelines
+# - Handle FAQs before diving into qualification if asked
+# - Use IST timing for scheduling (e.g., today is 03:46 PM IST, Tuesday, September 23, 2025)
+# - Ask one question at a time to avoid overwhelming them
+# - Keep responses focused on qualifying their suitability for MediShop’s offerings
+# - Ask location-specific questions about Bangalore areas for delivery logistics
+# - Show enthusiasm for solving their supply chain challenges
+# - Be respectful of their busy schedules and operational constraints
+# - Emphasize the opportunity to enhance patient care with reliable supplies
+
+# ## Scenario Handling
+# ### Interested Leads
+# - Enthusiasm: "Your needs align perfectly with our offerings! Let’s connect you with a sales rep."
+# - Route: Use transfer_call to sales rep.
+
+# ### Support Queries
+# - Detect: If "support" or "help" in input, say "Let me route you to our support team."
+# - Route: Use transfer_call to support.
+
+# ### Reminders
+# - Meeting: "This is a reminder for your demo on [date/time]. Ready to proceed?" (e.g., use current date + 1 day if unspecified)
+# - Payment: "This is a payment reminder for your invoice due by [date]. Settled?" (e.g., use current date + 1 day if unspecified)
+
+# ### For High-Volume Buyers
+# - Express enthusiasm: "Your usage volume is impressive! We can offer tailored discounts."
+# - Fast-track process: "Given your needs, let’s expedite a detailed quote. When’s best?"
+# - Highlight premium offerings: "Our premium equipment and bulk deals could be ideal."
+
+# ### For Small Clinics or New Buyers
+# - Explore potential: "Even small setups benefit from our flexible plans. Tell me about your needs."
+# - Support emphasis: "We provide training and support to ease transitions. Interested?"
+# - Alternative solutions: "Interested in starter kits or trial orders?"
+
+# ### For Delivery or Logistics Concerns
+# - Flexible scheduling: "We can adjust delivery times to suit you. What works best?"
+# - Local support: "We have local teams in Bangalore. Which areas are you in?"
+# - Assurance: "Our logistics ensure timely delivery. Want to discuss specifics?"
+
+# ### For Candidates Requesting Human Assistance
+# - If they want human help or details on contracts/partnerships:
+#   - Use transfer_call
+#   - Say: "Of course! Let me connect you with our sales manager for detailed discussions."
+
+# ## Knowledge Base
+# ### Caller Info
+# - name: {{name}}, email: {{email}}, phone_number: {{phone_number}}, role: {{role}}
+
+# ### MediShop Model
+# - Leading medical supplies provider in Bengaluru, serving clinics and hospitals
+# - Offers equipment, consumables, maintenance, and training
+# - Focuses on reliable, high-quality supplies to improve patient care
+
+# ### Requirements
+# - Clear understanding of current supply needs and budget
+# - Located in Bangalore with ability to receive deliveries
+# - Professional communication and decision-making authority
+
+# ### Assessment Criteria
+# - Monthly supply volume and budget
+# - Current suppliers and satisfaction levels
+# - Specific equipment or consumable needs
+# - Decision-making role and authority
+# - Language capabilities (English/Kannada/Hindi)
+# - Delivery location and logistics preferences
+
+# ## Response Refinement
+# - When discussing needs: "Your setup sounds interesting. Could you share more about [specific need]?"
+# - When explaining offerings: "Let me share how MediShop can streamline your supply chain..."
+# - When confirming details: "To confirm—your needs are [needs] and delivery is to [location]. Correct?"
+
+# ## Call Management
+# ### Available Functions
+# - check_calendar_availability: Use for scheduling follow-up meetings
+# - book_appointment: Use to confirm scheduled appointments
+# - transfer_call: Use when candidate requests human assistance
+# - end_call: Use to conclude every conversation
+
+# ## Technical Considerations
+# - If calendar delays occur: "I’m checking available slots. This will take a moment."
+# - If multiple scheduling needs: "Let’s book your appointment first, then address other questions."
+# - Always confirm appointment details before ending: "To confirm, we’re scheduled for [day], [date] at [time IST]. You’ll receive an email."
+
+# ---
+# Your goal is to qualify leads for medical supply sales, ensure they understand MediShop’s value, and maintain a professional reputation. Prioritize accurate qualification, scheduling, and enthusiasm across all call types.
+
+# """
+
+
+
+# hospital_receptionist_prompt="""
+# # Hospital Receptionist Prompt
+# ## Identity & Purpose
+# You are Emma, a virtual receptionist for City Hospital, a premier healthcare facility in Bengaluru, India. We provide comprehensive medical services, including consultations, diagnostics, and surgeries, to patients across Bangalore.
+# Your primary purpose is to assist callers with scheduling appointments, answering general inquiries about hospital services, directing calls to appropriate departments, and handling FAQs for both inbound and outbound calls.
+
+# ## Voice & Persona
+# ### Personality
+# - Sound calm, professional, and empathetic—like a caring healthcare professional
+# - Project genuine interest in helping callers with their medical needs
+# - Maintain a patient and reassuring demeanor throughout the conversation
+# - Show respect for their urgency while addressing their inquiries efficiently
+# - Convey confidence in City Hospital’s ability to provide excellent care
+
+# ### Speech Characteristics
+# - Use clear, soothing, and professional language with a supportive tone
+# - Keep messages under 150 characters when possible
+# - Include clarifying questions to understand their needs
+# - Show empathy for their health concerns or questions
+# - Use reassuring language when addressing inquiries or scheduling
+
+# ## Conversation Flow
+# ### Introduction
+# 1. For inbound: "Hello {{name}}, this is Emma from City Hospital. How can I assist with your appointment or inquiry today?"
+# 2. For outbound: "Hello {{name}}, this is Emma from City Hospital. I’m following up on your inquiry. Available to discuss?"
+# 3. Follow with: "I can help schedule appointments, answer questions about services, or connect you to a department."
+
+# ### FAQs Handling
+# - Appointment Process: "Appointments can be booked online or by phone. Want to schedule one now?"
+# - Services: "We offer consultations, diagnostics, and surgeries. Need details on a specific service?"
+# - Visiting Hours: "Visiting hours are 10 AM–8 PM. Need directions or parking info?"
+
+# ### Caller Needs Assessment
+# - Location: "Could you confirm if you’re visiting our Bangalore branch?"
+# - Purpose: "Are you scheduling an appointment, seeking information, or needing support?"
+# - Urgency: "Is this an urgent medical need, or a routine visit?"
+
+# ### Appointment Scheduling
+# - Department: "Which department or doctor would you like to see?"
+# - Availability: "When are you available for an appointment?"
+# - Details: "Please provide your full name, contact details, and preferred time."
+
+# ### Inquiry Handling
+# - Explain: "City Hospital offers comprehensive care with top specialists."
+# - Specifics: "Need info on specific treatments, like cardiology or orthopedics?"
+# - Support: "I can connect you to our patient support team if needed."
+
+# ### Scheduling
+# - If scheduling: "Let’s book your appointment. When are you free this week?"
+# - Use check_calendar_availability and book_appointment.
+# - Confirm: "Please confirm your full name, email, and preferred time."
+
+# ### Close
+# - Positive: "Thank you, {{name}}. Your appointment is confirmed, and details will be sent. Wishing you well!"
+# - End with end_call unless transferred
+
+# ## Response Guidelines
+# - Handle FAQs before diving into scheduling or inquiries if asked
+# - Use IST timing for scheduling (e.g., today is 03:46 PM IST, Tuesday, September 23, 2025)
+# - Ask one question at a time to avoid overwhelming callers
+# - Keep responses focused on assisting with their immediate needs
+# - Ask location-specific questions about Bangalore for in-person visits
+# - Show empathy for health concerns and urgency
+# - Be respectful of their time and potential stress
+# - Emphasize City Hospital’s commitment to patient care
+
+# ## Scenario Handling
+# ### Urgent Medical Inquiries
+# - Urgency: "For emergencies, please visit our ER or call our hotline. Need directions?"
+# - Route: Use transfer_call to emergency department if urgent.
+
+# ### Support Queries
+# - Detect: If "support" or "complaint" in input, say "Let me connect you to our patient support team."
+# - Route: Use transfer_call to support.
+
+# ### Reminders
+# - Appointment: "This is a reminder for your appointment on [date/time]. Confirm or reschedule?" (e.g., use current date + 1 day if unspecified)
+# - Follow-up: "This is a follow-up for your recent inquiry. Ready to proceed?"
+
+# ### For First-Time Patients
+# - Reassurance: "First visits are seamless with our support. Tell me about your needs."
+# - Guidance: "We’ll guide you through the process. Need help with registration?"
+# - Options: "Interested in a consultation or diagnostic services?"
+
+# ### For Returning Patients
+# - History: "Welcome back! Have you visited us before for [specific service]?"
+# - Fast-track: "Let’s quickly schedule your next appointment. When’s convenient?"
+# - Loyalty: "As a returning patient, we prioritize your care. Any specific needs?"
+
+# ### For Logistical Concerns
+# - Flexible scheduling: "We can adjust appointment times. What works for you?"
+# - Directions: "We’re located in Bangalore. Need directions to our facility?"
+# - Transport: "Need help with parking or transport options?"
+
+# ### For Callers Requesting Human Assistance
+# - If they want human help or detailed medical advice:
+#   - Use transfer_call
+#   - Say: "Let me connect you with our patient coordinator for further assistance."
+
+# ## Knowledge Base
+# ### Caller Info
+# - name: {{name}}, email: {{email}}, phone_number: {{phone_number}}, role: {{role}}
+
+# ### City Hospital Model
+# - Premier healthcare facility in Bengaluru, offering consultations, diagnostics, and surgeries
+# - Partners with top specialists and provides patient support
+# - Focuses on accessible, high-quality healthcare
+
+# ### Requirements
+# - Clear understanding of caller’s medical or appointment needs
+# - Located in or able to visit Bangalore
+# - Basic contact information for scheduling
+
+# ### Assessment Criteria
+# - Purpose of call (appointment, inquiry, support)
+# - Preferred department or doctor
+# - Urgency of medical needs
+# - Contact details and availability
+# - Language capabilities (English/Kannada/Hindi)
+# - Accessibility to Bangalore facility
+
+# ## Response Refinement
+# - When discussing needs: "I understand your concern. Could you share more about [specific need]?"
+# - When explaining services: "Let me explain how City Hospital can assist you..."
+# - When confirming details: "To confirm—your appointment is for [service] at [time]. Correct?"
+
+# ## Call Management
+# ### Available Functions
+# - check_calendar_availability: Use for scheduling appointments
+# - book_appointment: Use to confirm scheduled appointments
+# - transfer_call: Use when caller requests human assistance
+# - end_call: Use to conclude every conversation
+
+# ## Technical Considerations
+# - If calendar delays occur: "I’m checking available slots. This will take a moment."
+# - If multiple scheduling needs: "Let’s book your appointment first, then address other questions."
+# - Always confirm appointment details before ending: "To confirm, we’re scheduled for [day], [date] at [time IST]. You’ll receive an email."
+
+# ---
+# Your goal is to assist callers efficiently, ensure they feel supported, and maintain City Hospital’s reputation for excellent patient care. Prioritize accurate scheduling, empathy, and clear communication across all call types.
+
+# """
+
+
+
+# # Groq LLM setup
+# llm = ChatGroq(model_name="llama-3.1-8b-instant")
+# # llm = ChatGroq(model_name="groq/compound-mini")
+
+# # Config Manager
+# config_manager = InMemoryConfigManager()
+# shared_config_manager = InMemoryConfigManager()  # CHANGED
+
+# # ADDED for JSON capture with LLM extraction: global in-memory store
+# CONVERSATION_STORE: dict = {}  # ADDED for JSON LLM extraction
+
+# # ADDED for JSON capture with LLM extraction: directory for local persistence
+# CONVERSATIONS_DIR = Path("conversations")  # ADDED
+# CONVERSATIONS_DIR.mkdir(exist_ok=True, parents=True)  # ADDED
+
+# # ADDED n8n: store lead context by call_sid/conversation_id
+# LEAD_CONTEXT_STORE: dict = {}  # ADDED n8n
+
+
+# # Sentiment Analysis Chain (using Groq LLM)
+# sentiment_prompt = PromptTemplate(
+#     input_variables=["transcript"],
+#     template="Analyze the sentiment of this transcript: {transcript}. Return a JSON with 'sentiment' (positive, neutral, negative, angry, confused) and 'tone_score' (1-10, 10 being most positive)."
+# )
+# sentiment_chain = LLMChain(llm=llm, prompt=sentiment_prompt)
+
+# # Summary Generation Chain (using Groq LLM)
+# summary_prompt = PromptTemplate(
+#     input_variables=["transcript"],
+#     template="Generate a summary of this transcript: {transcript}. Include key points, customer intent, and next actions. Return a JSON with 'summary', 'intent', 'next_actions' (array of strings)."
+# )
+# summary_chain = LLMChain(llm=llm, prompt=summary_prompt)
+
+
+
+# # Send Email Function
+# def send_email(to_email: str, subject: str, body: str):
+#     msg = MIMEText(body)
+#     msg['Subject'] = subject
+#     msg['From'] = EMAIL_SENDER
+#     msg['To'] = to_email
+#     with smtplib.SMTP(EMAIL_SMTP_SERVER, EMAIL_SMTP_PORT) as server:
+#         server.starttls()  # Added TLS for security
+#         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+#         server.sendmail(EMAIL_SENDER, to_email, msg.as_string())
+#     logger.info(f"Email sent to {to_email}")
+
+# # Send WhatsApp Summary Function (using Twilio)
+# def send_whatsapp(to_phone: str, body: str):
+#     client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+#     client.messages.create(
+#         from_='whatsapp:' + WHATSAPP_SENDER,
+#         body=body,
+#         to='whatsapp:' + to_phone
+#     )
+#     logger.info(f"WhatsApp sent to {to_phone}")
+
+
+
+# # NEW: Check Calendar Availability
+# async def check_calendar_availability(preferred_time: str) -> dict:
+#     headers = {"Authorization": f"Bearer {CRM_API_KEY}"}
+#     params = {"time": preferred_time, "timezone": "Asia/Kolkata"}
+#     async with httpx.AsyncClient() as client:
+#         response = await client.get(CALENDAR_API_URL, headers=headers, params=params)
+#         if response.status_code == 200:
+#             return response.json()
+#         logger.error(f"Calendar check failed: {response.text}")
+#         return {"available": False, "slots": []}
+    
+
+
+# # NEW: Book Appointment
+# async def book_appointment(lead_id: str, name: str, email: str, time: str):
+#     payload = {
+#         "lead_id": lead_id,
+#         "name": name,
+#         "email": email,
+#         "time": time,
+#         "status": "Scheduled"
+#     }
+#     headers = {"Authorization": f"Bearer {CRM_API_KEY}"}
+#     async with httpx.AsyncClient() as client:
+#         response = await client.post(f"{CRM_API_URL}/appointments", json=payload, headers=headers)
+#         if response.status_code == 200:
+#             logger.info(f"Appointment booked for lead {lead_id}")
+#             return True
+#         logger.error(f"Appointment booking failed: {response.text}")
+#         return False
+
+
+# # NEW: Update CRM Function (placeholder; replace with your CRM API)
+# def update_crm(lead_id: str, transcript: str, sentiment: dict, summary: dict, audio_url: str, twilio_audio_url: Optional[str] = None, status: str = "Called", appointment: dict = None):
+#     payload = {
+#         "lead_id": lead_id,
+#         "transcript": transcript,
+#         "sentiment": sentiment,
+#         "summary": summary,
+#         "audio_url": audio_url,
+#         "twilio_audio_url": twilio_audio_url,  # NEW: Twilio full call recording
+#         "status": status,
+#         "appointment": appointment
+#     }
+#     headers = {"Authorization": f"Bearer {CRM_API_KEY}"}
+#     response = requests.post(CRM_API_URL, json=payload, headers=headers)
+#     if response.status_code == 200:
+#         logger.info(f"CRM updated for lead {lead_id}")
+#     else:
+#         logger.error(f"CRM update failed: {response.text}")
+
+
+
+# # Events Manager to log transcripts
+# class ChessEventsManager(events_manager.EventsManager):
+#     def __init__(self):
+#         super().__init__(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
+
+#     async def handle_event(self, event: Event):
+#         if event.type == EventType.TRANSCRIPT_COMPLETE:
+#             transcript_complete_event = typing.cast(TranscriptCompleteEvent, event)
+#             transcript = transcript_complete_event.transcript.to_string()
+#             logger.debug(f"Transcript for conversation {transcript_complete_event.conversation_id}: {transcript}")
+
+#             # NEW: Sentiment analysis
+#             sentiment = await sentiment_chain.ainvoke({"transcript": transcript})
+
+#             # NEW: Summary generation
+#             summary = await summary_chain.ainvoke({"transcript": transcript})
+
+#             # NEW: Recording storage (using Deepgram audio chunks)
+#             audio_path = await save_recording(transcript_complete_event.conversation_id)
+#             audio_url = f"{CLOUD_STORAGE_URL}/{os.path.basename(audio_path)}" if CLOUD_STORAGE_URL else audio_path
+
+#             # NEW: Fetch Twilio recording URL if available
+#             client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+#             recordings = await asyncio.get_event_loop().run_in_executor(
+#                 None,
+#                 lambda: client.recordings.list(call_sid=transcript_complete_event.conversation_id)
+#             )
+#             twilio_audio_url = recordings[0].uri if recordings else None  # NEW: Get Twilio recording URL
+
+#             await asyncio.get_event_loop().run_in_executor(
+#                 None, 
+#                 lambda: update_crm(transcript_complete_event.conversation_id, transcript, sentiment, summary, audio_url, twilio_audio_url=twilio_audio_url)  # Fixed to use audio_url
+#             )
+
+#             # NEW: Send summary to customer/management
+#             # Assume email and phone from lead context or CRM
+#             short_summary = f"Call Summary: {summary['summary'][:100]}... Next steps: {', '.join(summary['next_actions'][:2])}"
+#             lead = LEAD_CONTEXT_STORE.get(transcript_complete_event.conversation_id, {})
+#             if "email" in lead:
+#                 send_email(lead["email"], "Call Summary", short_summary)
+#             if "to_phone" in lead:
+#                 send_whatsapp(lead["to_phone"], short_summary)
+
+#             webhook_url = os.getenv("TRANSCRIPT_CALLBACK_URL")
+#             if webhook_url:
+#                 data = {"conversation_id": transcript_complete_event.conversation_id, "user_id": 1, "transcript": transcript}
+#                 async with httpx.AsyncClient() as client:
+#                     response = await client.post(webhook_url, json=data)
+#                     if response.status_code == 200:
+#                         logger.info("Transcript sent successfully to webhook")
+#                     else:
+#                         logger.error(f"Failed to send transcript to webhook: {response.status_code}")
+#             # ADDED for JSON capture with LLM extraction: write store JSON to disk
+#             try:
+#                 convo = CONVERSATION_STORE.get(transcript_complete_event.conversation_id)
+#                 if convo:
+#                     convo["sentiment"] = sentiment  # NEW
+#                     convo["summary"] = summary  # NEW
+#                     out_path = CONVERSATIONS_DIR / f"{transcript_complete_event.conversation_id}.json"
+#                     with open(out_path, "w", encoding="utf-8") as f:
+#                         json.dump(convo, f, ensure_ascii=False, indent=2)
+#                     logger.info(f"Wrote JSON summary to {out_path}")
+#             except Exception as e:
+#                 logger.error(f"Failed to write JSON summary: {e}")
+
+
+# async def save_recording(conversation_id: str) -> str:
+#     # Assume transcriber instance is accessible via a global or passed reference
+#     transcriber = None  # Placeholder; should be injected or managed by TelephonyServer
+#     if transcriber and hasattr(transcriber, 'audio_buffer') and transcriber.conversation_id == conversation_id:
+#         await transcriber._save_audio()
+#         audio_path = RECORDINGS_DIR / f"{conversation_id}.wav"
+#         return str(audio_path)
+#     logger.error(f"No valid transcriber or buffer for conversation {conversation_id}")
+#     return ""
+
+# # Custom Agent Config
+# class CustomLangchainAgentConfig(LangchainAgentConfig, type="agent_langchain"):
+#     initial_message: BaseMessage = BaseMessage(text="Hello, this is Priya from 4champz, a leading chess coaching service in Bengaluru. Do you have 5-10 minutes to discuss some exciting chess coaching opportunities with schools in Bangalore?")
+#     prompt_preamble: str = CHESS_COACH_PROMPT_PREAMBLE
+#     model_name: str = "llama-3.1-8b-instant"
+#     # model_name: str = "groq/compound-mini"
+#     api_key: str = GROQ_API_KEY
+#     provider: str = "groq"
+
+# # Custom Langchain Agent
+# class CustomLangchainAgent(LangchainAgent):
+#     def __init__(self, agent_config: CustomLangchainAgentConfig):
+#         logger.debug(f"Initializing CustomLangchainAgent with config: {agent_config}")
+#         super().__init__(agent_config=agent_config)
+#         self.last_response_time = time.time()
+#         self.conversation_state = "initial"
+#         self.no_input_count = 0
+#         self.user_name = None  # store extracted/confirmed name
+#         self.asked_for_name = False  # track if name is requested
+#         logger.debug("Initialized CustomLangchainAgent with Groq LLM (llama-3.1-8b-instant)")
+#         # ADDED for JSON capture with LLM extraction
+#         self.turns = []  # [{"speaker":"user"/"bot","text":..., "ts": epoch_ms}]
+#         self.conversation_id_cache = None  # to index the global store
+#         self.extracted_slots = {}  # LLM-extracted structured data
+
+
+#     # ADDED n8n: helper to ensure id
+#     def _ensure_conv_id(self, conversation_id: Optional[str]) -> str:
+#         if conversation_id and isinstance(conversation_id, str) and conversation_id.strip():
+#             return conversation_id
+#         return f"unknown_{int(time.time()*1000)}"
+
+#     # ADDED for JSON capture with LLM extraction
+#     def _flush_to_disk(self, conversation_id: str):
+#         """Write the current conversation JSON to disk immediately."""
+#         try:
+#             payload = CONVERSATION_STORE.get(conversation_id)
+#             if not payload:
+#                 return
+#             out_path = CONVERSATIONS_DIR / f"{conversation_id}.json"
+#             with open(out_path, "w", encoding="utf-8") as f:
+#                 json.dump(payload, f, ensure_ascii=False, indent=2)
+#             logger.debug(f"Flushed conversation {conversation_id} to {out_path}")
+#         except Exception as e:
+#             logger.error(f"Flush to disk failed for {conversation_id}: {e}")
+
+#     # ADDED for JSON capture with LLM extraction
+#     def _persist_state(self, conversation_id: Optional[str]):
+#         conv_id = self._ensure_conv_id(conversation_id)
+#         now_ms = int(time.time() * 1000)
+#         lead = LEAD_CONTEXT_STORE.get(conv_id, {})  # ADDED n8n
+#         payload = {
+#             "conversation_id": conv_id,
+#             "updated_at": now_ms,
+#             "lead": lead,  # ADDED n8n
+#             "slots": self.extracted_slots,  # slots are LLM-extracted
+#             "turns": self.turns
+#         }
+#         CONVERSATION_STORE[conv_id] = payload
+#         self._flush_to_disk(conv_id)  # ADDED: always flush on persist
+
+#     # ADDED for JSON capture with LLM extraction
+#     def _strip_code_fences(self, s: str) -> str:
+#         t = (s or "").strip()
+#         if t.startswith("```"):
+#             end = t.rfind("```")
+#             if end > 0:
+#                 inner = t[3:end].strip()
+#                 if inner.lower().startswith("json"):
+#                     inner = inner[4:].strip()
+#                 return inner
+#         return t
+
+#     # ADDED for JSON capture with LLM extraction
+#     async def _extract_slots_with_llm(self, conversation_id: str):
+#         """Extract slots with retry logic."""
+#         max_retries = 3
+#         retry_delay = 2  # seconds
+
+#         for attempt in range(max_retries):
+#             try:
+#                 # Build a compact transcript string
+#                 convo_lines = []
+#                 for t in self.turns[-30:]:
+#                     role = "User" if t["speaker"] == "user" else "Agent"
+#                     text_line = re.sub(r'\s+', ' ', t['text']).strip()
+#                     convo_lines.append(f"{role}: {text_line}")
+#                 convo_text = "\n".join(convo_lines)
+
+#                 # Instruction for JSON-only schema
+#                 schema_instruction = (
+#                     "Return ONLY a JSON object with these keys:\n"
+#                     "{\n"
+#                     '  "location": string|null,\n'
+#                     '  "involvement": "playing"|"coaching"|null,\n'
+#                     '  "availability": string|null,\n'
+#                     '  "age_range": string|null,\n'
+#                     '  "languages": string[]|null,\n'
+#                     '  "rating": string|null,\n'
+#                     '  "tournaments": string|null,\n'
+#                     '  "certifications": string|null,\n'
+#                     '  "questions": string[]|null,\n'
+#                     '  "intent": "interested"|"support"|"reminder"|null\n'
+#                     '}\n'
+#                     "Infer conservatively. Use null if not explicitly known."
+#                 )
+
+#                 prompt = f"{schema_instruction}\n\nConversation:\n{convo_text}\n\nJSON:"
+
+#                 extractor = ChatGroq(model_name="llama-3.1-8b-instant")
+#                 resp = await extractor.ainvoke([
+#                     {"role": "system", "content": "You extract structured information from conversations."},
+#                     {"role": "user", "content": prompt}
+#                 ])
+
+#                 # Normalize content
+#                 content = None
+#                 if hasattr(resp, "content"):
+#                     content = resp.content
+#                 elif hasattr(resp, "generations"):
+#                     try:
+#                         content = resp.generations.text
+#                     except Exception:
+#                         content = str(resp)
+#                 else:
+#                     content = str(resp)
+
+#                 parsed = None
+#                 try:
+#                     c = self._strip_code_fences(content)
+#                     parsed = json.loads(c)
+#                 except Exception:
+#                     logger.warning("Primary JSON parse failed; attempting to locate JSON object")
+#                     first = content.find("{")
+#                     last = content.rfind("}")
+#                     if first != -1 and last != -1 and last > first:
+#                         snippet = content[first:last+1]
+#                         try:
+#                             parsed = json.loads(snippet)
+#                         except Exception:
+#                             parsed = None
+
+#                 if isinstance(parsed, dict):
+#                     # normalize keys
+#                     for k in ["location","involvement","availability","age_range","languages","rating","tournaments","certifications","questions"]:
+#                         if k not in parsed:
+#                             parsed[k] = None
+#                     # Ensure types
+#                     if parsed.get("languages") is not None and not isinstance(parsed["languages"], list):
+#                         parsed["languages"] = [str(parsed["languages"])]
+#                     if parsed.get("questions") is not None and not isinstance(parsed["questions"], list):
+#                         parsed["questions"] = [str(parsed["questions"])]
+
+#                     self.extracted_slots = parsed
+#                     self._persist_state(conversation_id)
+#                 else:
+#                     logger.warning("LLM extraction did not return a dict; keeping previous slots.")
+#                     if attempt < max_retries - 1:
+#                         await asyncio.sleep(retry_delay)
+#                         continue
+#                     raise ValueError("Failed to parse valid JSON after retries")
+
+#             except Exception as e:
+#                 logger.error(f"Slot extraction failed (attempt {attempt + 1}/{max_retries}): {e}")
+#                 if attempt < max_retries - 1:
+#                     await asyncio.sleep(retry_delay)
+#                     continue
+#                 raise  # Re-raise after final attempt
+
+#     async def end_call(self, conversation_id: str):
+#         """End the call by returning a TwiML Hangup response."""
+#         twiml_response = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>'
+#         await self.send_message(BaseMessage(text=twiml_response), conversation_id)  # Use existing send_message to pass TwiML
+#         logger.info(f"Call ended for conversation_id: {conversation_id}")
+
+#     async def respond(self, human_input: str, conversation_id: str, is_interrupt: bool = False) -> Tuple[Optional[str], bool]:
+#         try:
+#             start_time = time.time()
+
+#             if conversation_id and self.conversation_id_cache != conversation_id:
+#                 self.conversation_id_cache = conversation_id
+#             current_id = self.conversation_id_cache or conversation_id or "unknown"
+
+#             if human_input:
+#                 self.turns.append({"speaker": "user", "text": human_input, "ts": int(time.time()*1000)})
+#                 if len(self.turns) % 2 == 0:
+#                     asyncio.create_task(self._extract_slots_with_llm(current_id))
+#                 self._persist_state(current_id)
+
+#             def personalize_response(text: str) -> str:
+#                 if self.user_name:
+#                     return text.replace("{name}", self.user_name)
+#                 external_name = "there"
+#                 return text.replace("{name}", external_name)
+
+#             if time.time() - self.last_response_time > 15:
+#                 self.no_input_count += 1
+#                 logger.warning(f"No transcription for 15s (attempt {self.no_input_count})")
+#                 if self.no_input_count >= 3:
+#                     bot_text = personalize_response("Trouble connecting. I’ll follow up later. Thank you!")
+#                     self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+#                     self._persist_state(current_id)
+#                     await self.end_call(conversation_id)  # New: End the call
+#                     return bot_text, True
+#                 bot_text = personalize_response("I didn’t catch that. Available to discuss chess coaching?")
+#                 self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+#                 self._persist_state(current_id)
+#                 return bot_text, False
+
+#             normalized = (human_input or "").strip().lower()
+#             filler_phrases = {"", "mhmm", "okay", "what", "yes", "no", "a-", "four", "hello", "hi"}
+#             if normalized in filler_phrases:
+#                 self.no_input_count += 1
+#                 logger.debug(f"Filler input (count {self.no_input_count}): '{human_input}'")
+#                 if self.no_input_count >= 3:
+#                     bot_text = personalize_response("No valid input. I’ll follow up later. Thank you!")
+#                     self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+#                     self._persist_state(current_id)
+#                     return bot_text, True
+#                 self.last_response_time = start_time
+#                 bot_text = personalize_response("Didn’t catch that. Confirm availability?")
+#                 self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+#                 self._persist_state(current_id)
+#                 return bot_text, False
+
+#             gibberish_indicators = ["what is the first time", "first time", "please repeat", "say again"]
+#             if any(phrase in normalized for phrase in gibberish_indicators):
+#                 self.no_input_count += 1
+#                 logger.debug(f"Gibberish input (count {self.no_input_count}): '{human_input}'")
+#                 if self.no_input_count >= 3:
+#                     bot_text = personalize_response("Trouble connecting. I’ll follow up later. Thank you!")
+#                     self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+#                     self._persist_state(current_id)
+#                     return bot_text, True
+#                 self.last_response_time = start_time
+#                 bot_text = personalize_response("Sorry, repeat or say yes/no if available?")
+#                 self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+#                 self._persist_state(current_id)
+#                 return bot_text, False
+
+#             self.no_input_count = 0
+
+#             if self.asked_for_name and "name is" in normalized:
+#                 try:
+#                     name_part = human_input.lower().split("name is", 1)[1].strip().split()
+#                     self.user_name = name_part[0].capitalize()
+#                     logger.debug(f"Extracted user name: {self.user_name}")
+#                 except Exception:
+#                     self.user_name = None
+
+#             slots = self.extracted_slots
+#             intent = slots.get("intent")
+
+#             # FAQ handling
+#             if any(q in normalized for q in ["price", "pricing", "cost", "timings", "time", "services"]):
+#                 if "price" in normalized or "cost" in normalized:
+#                     response = "Our fees start at ₹500/hour, varying by experience. Want more details?"
+#                 elif "timings" in normalized or "time" in normalized:
+#                     response = "Coaching is 3-6 PM school hours. Flexible options available—discuss?"
+#                 elif "services" in normalized:
+#                     response = "We offer curricula, training, and school placements. More questions?"
+#                 self.last_response_time = start_time
+#                 self.turns.append({"speaker": "bot", "text": response, "ts": int(time.time()*1000)})
+#                 self._persist_state(current_id)
+#                 return response, False
+
+#             # NEW: Real-time sentiment-based routing
+#             sentiment = await sentiment_chain.ainvoke({"transcript": "\n".join(t["text"] for t in self.turns)})
+#             if sentiment["sentiment"] == "angry" or "upset" in normalized:
+#                 logger.info("Detected angry tone, routing to calm rep")
+#                 bot_text = "I’ll connect you with a calm rep to assist you."
+#                 self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+#                 self._persist_state(current_id)
+#                 return bot_text, True
+
+#             if self.conversation_state == "initial":
+#                 if any(word in normalized for word in ["yes", "sure", "okay", "available"]):
+#                     self.conversation_state = "background"
+#                     response = "Great! Due to your interest, confirm your Bangalore location?"
+#                 else:
+#                     response = personalize_response("Sorry, misheard. Available to discuss coaching?")
+#                 self.last_response_time = start_time
+#                 self.turns.append({"speaker": "bot", "text": response, "ts": int(time.time()*1000)})
+#                 self._persist_state(current_id)
+#                 return response, False
+#             else:
+#                 try:
+#                     response, should_end = await asyncio.wait_for(
+#                         super().respond(human_input, conversation_id, is_interrupt), timeout=5.0
+#                     )
+#                 except asyncio.TimeoutError:
+#                     fallback_msg = personalize_response("Response delayed. Try again shortly.")
+#                     self.turns.append({"speaker": "bot", "text": fallback_msg, "ts": int(time.time()*1000)})
+#                     self._persist_state(current_id)
+#                     await self.end_call(conversation_id)  # New: End call on timeout
+#                     return fallback_msg, True
+
+#                 if response:
+#                     response_text = personalize_response(response)
+#                     if "location" in response_text.lower():
+#                         self.conversation_state = "background"
+#                     if any(phrase in response_text.lower() for phrase in ["confirm your full name", "may i have your name"]):
+#                         self.asked_for_name = True
+
+#                     if intent == "interested" and "schedule" in response_text.lower():
+#                         available_slots = await check_calendar_availability(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+#                         if available_slots["available"]:
+#                             bot_text = f"Great! Available slots: {', '.join(available_slots['slots'])}. Provide name, email, and preferred time?"
+#                             self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+#                             self._persist_state(current_id)
+#                             return bot_text, False
+#                         else:
+#                             bot_text = "No slots available now. I’ll follow up. Thank you!"
+#                             self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+#                             self._persist_state(current_id)
+#                             await self.end_call(conversation_id)  # New: End the call
+#                             return bot_text, True
+
+#                     if intent == "support":
+#                         bot_text = "Let me route you to our support team."
+#                         self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+#                         self._persist_state(current_id)
+#                         return bot_text, True
+#                     elif intent == "interested":
+#                         bot_text = "Impressive! Connecting you to a sales rep."
+#                         self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+#                         self._persist_state(current_id)
+#                         await self.end_call(conversation_id)  # New: End call after routing
+#                         return bot_text, True
+
+#                     self.last_response_time = start_time
+#                     self.turns.append({"speaker": "bot", "text": response_text, "ts": int(time.time()*1000)})
+#                     if len(self.turns) % 4 == 0:
+#                         asyncio.create_task(self._extract_slots_with_llm(current_id))
+#                     self._persist_state(current_id)
+#                     return response_text, should_end
+
+#                 fallback_msg = personalize_response("Didn’t get that. Tell me more?")
+#                 self.last_response_time = start_time
+#                 self.turns.append({"speaker": "bot", "text": fallback_msg, "ts": int(time.time()*1000)})
+#                 self._persist_state(current_id)
+#                 return fallback_msg, False
+
+#         except Exception as e:
+#             logger.error(f"Error generating response: {str(e)}")
+#             fallback_error_msg = "Error occurred. Try again."
+#             self.turns.append({"speaker": "bot", "text": fallback_error_msg, "ts": int(time.time()*1000)})
+#             current_id = self.conversation_id_cache or conversation_id or "unknown"
+#             self._persist_state(current_id)
+#             return fallback_error_msg, False
+    
+
+
+
+
+
+
+
+
+# # Custom Deepgram Transcriber with keepalive and chunk logging
+# class CustomDeepgramTranscriber(DeepgramTranscriber):
+#     def __init__(self, transcriber_config: DeepgramTranscriberConfig):
+#         super().__init__(transcriber_config)
+#         self.audio_buffer = io.BytesIO()
+#         self.conversation_id = None
+
+#     async def process(self, audio_chunk: bytes):
+#         logger.debug(f"Processing audio chunk size: {len(audio_chunk)} bytes")
+#         if not audio_chunk or len(audio_chunk) == 0:
+#             logger.warning("Empty audio chunk - skipping")
+#             return None
+#         try:
+#             async with self.buffer_lock:
+#                 if self.conversation_id:
+#                     total_size = self.audio_buffer.tell() + len(audio_chunk)
+#                     if total_size > 10 * 1024 * 1024:  # 10MB limit
+#                         await self._save_audio()
+#                     self.audio_buffer.write(audio_chunk)
+#             return await super().process(audio_chunk)
+#         except Exception as e:
+#             logger.error(f"Deepgram process error: {e}")
+#             raise
+    
+
+#     async def keepalive(self):
+#         while True:
+#             await asyncio.sleep(10)
+#             try:
+#                 await super().process(b"\x00" * 160)
+#                 logger.debug("Deepgram keepalive sent")
+#             except Exception as e:
+#                 logger.error(f"Keepalive failed: {e}")
+#                 break
+
+
+#     def set_conversation_id(self, conversation_id: str):
+#         if self.conversation_id != conversation_id:
+#             if self.audio_buffer.tell() > 0:
+#                 asyncio.create_task(self._save_audio())
+#             self.conversation_id = conversation_id
+#             self.audio_buffer = io.BytesIO()
+
+#     async def _save_audio(self):
+#         if self.conversation_id and self.audio_buffer.tell() > 0:
+#             self.audio_buffer.seek(0)
+#             audio_path = RECORDINGS_DIR / f"{self.conversation_id}.wav"
+#             with open(audio_path, 'wb') as f:
+#                 f.write(self.audio_buffer.getbuffer())
+#             logger.info(f"Saved audio to {audio_path}")
+#             self.audio_buffer = io.BytesIO()
+
+# # Custom Agent Factory
+# class CustomAgentFactory:
+#     def create_agent(self, agent_config: AgentConfig, logger: Optional[logging.Logger] = None) -> BaseAgent:
+#         log = logger or globals().get("logger", logging.getLogger(__name__))
+#         log.debug("Creating agent with config type: %s", agent_config.type)
+#         # CHANGED: print the resolved config that TelephonyServer is about to use
+#         try:
+#             init_head = getattr(getattr(agent_config, "initial_message", None), "text", "")
+#             init_head = (init_head or "")[:120]
+#             prompt = getattr(agent_config, "prompt_preamble", "") or ""
+#             prompt_len = len(prompt)
+#             prompt_head = prompt[:120]
+#             log.info("Factory using -> init_head=%r | prompt_len=%d | prompt_head=%r", init_head, prompt_len, prompt_head)  # CHANGED
+#         except Exception as e:
+#             log.warning("Factory logging failed: %s", e)  # CHANGED
+
+#         if agent_config.type == "agent_langchain":
+#             log.debug("Creating CustomLangchainAgent")
+#             return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
+#         log.error("Invalid agent config type: %s", agent_config.type)
+#         raise Exception(f"Invalid agent config: {agent_config.type}")
+
+
+
+# # Custom Synthesizer Factory
+# class CustomSynthesizerFactory:
+#     def create_synthesizer(self, synthesizer_config: SynthesizerConfig) -> BaseSynthesizer:
+#         logger.debug(f"Creating synthesizer with config: {synthesizer_config}")
+#         if isinstance(synthesizer_config, StreamElementsSynthesizerConfig):
+#             logger.debug("Creating StreamElementsSynthesizer")
+#             return StreamElementsSynthesizer(synthesizer_config)
+#         logger.error(f"Invalid synthesizer config type: {synthesizer_config.type}")
+#         raise Exception(f"Invalid synthesizer config: {synthesizer_config.type}")
+
+# # FastAPI App
+# app = FastAPI()
+
+# @asynccontextmanager
+# async def lifespan(app: FastAPI):
+#     logger.debug("Starting up FastAPI application")
+#     logger.debug("Registered routes:")
+#     for route in app.routes:
+#         methods = getattr(route, "methods", ["WebSocket"])
+#         logger.debug(f" - {route.path} ({methods})")
+#     yield
+#     # ADDED: final sweep to persist any in-memory conversations at shutdown
+#     try:
+#         for conv_id in list(CONVERSATION_STORE.keys()):
+#             out_path = CONVERSATIONS_DIR / f"{conv_id}.json"
+#             with open(out_path, "w", encoding="utf-8") as f:
+#                 json.dump(CONVERSATION_STORE[conv_id], f, ensure_ascii=False, indent=2)
+#         logger.debug("Shutdown flush completed for all conversations")
+#     except Exception as e:
+#         logger.error(f"Error during shutdown flush: {e}")
+#     logger.debug("Shutting down FastAPI application")
+
+# app.router.lifespan_context = lifespan
+
+# # Twilio config
+# twilio_config = TwilioConfig(
+#     account_sid=TWILIO_ACCOUNT_SID,
+#     auth_token=TWILIO_AUTH_TOKEN
+# )
+
+# # Synthesizer config (telephone voice output)
+# synthesizer_config = StreamElementsSynthesizerConfig.from_telephone_output_device(
+#     voice="Brian"
+# )
+
+# transcriber_config = DeepgramTranscriberConfig(
+#     api_key=DEEPGRAM_API_KEY,
+#     model="nova-2-phonecall",
+#     language="en",
+#     sampling_rate=8000,  # int primitive, not enum
+#     audio_encoding="mulaw",  # lowercase string, not enum
+#     chunk_size=320,
+#     endpointing_config=PunctuationEndpointingConfig(),
+#     downsampling=1,
+# )
+
+# # Default config as a fallback
+# default_agent_config = LangchainAgentConfig(
+#     initial_message=BaseMessage(text="Hello, this is a default message."),
+#     prompt_preamble="",
+#     model_name="llama-3.1-8b-instant",
+#     api_key=GROQ_API_KEY,
+#     provider="groq",
+# )
+
+
+
+# # Telephony Server setup
+# telephony_server = TelephonyServer(
+#     base_url=BASE_URL,  # your ngrok url
+#     config_manager=config_manager,
+#     inbound_call_configs=[
+#         TwilioInboundCallConfig(
+#             url="/inbound_call",
+#             twilio_config=twilio_config,
+#             config_manager=shared_config_manager, 
+#             agent_config=default_agent_config,  # NEW: Use default for inbound calls
+#             synthesizer_config=synthesizer_config,
+#             transcriber_config=transcriber_config,  # Use instance
+#             agent_factory=CustomAgentFactory(),
+#             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
+# <Response>
+#     <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
+#     <Pause length="15"/>
+#     <Redirect method="POST">/inbound_call</Redirect>
+# </Response>''',
+#             record=True,
+#             status_callback=f"https://{BASE_URL}/call_status",  # NEW: Added for inbound call status
+#             status_callback_method="POST",
+#             status_callback_event=["completed"]  # Trigger on call completion
+#         )
+#     ],
+#     agent_factory=CustomAgentFactory(),
+#     synthesizer_factory=CustomSynthesizerFactory(),
+#     events_manager=ChessEventsManager(),
+# )
+
+# # Add routes to FastAPI app
+# app.include_router(telephony_server.get_router())
+
+
+# # Fix call_status to handle empty JSON
+# @app.post("/call_status")
+# async def call_status(request: Request):
+#     try:
+#         # Twilio sends application/x-www-form-urlencoded by default
+#         form = await request.form()
+#         call_sid = form.get("CallSid")
+#         status = form.get("CallStatus")
+#         recording_sid = form.get("RecordingSid")
+#         recording_url = form.get("RecordingUrl")
+#         logger.info(f"Call status update: SID={call_sid}, Status={status}, RecSid={recording_sid}, RecUrl={recording_url}")
+
+#         if call_sid and call_sid in CONVERSATION_STORE:
+#             CONVERSATION_STORE[call_sid]["status"] = status
+#             if status in ["completed", "failed", "no-answer", "busy"]:
+#                 conversation = CONVERSATION_STORE.get(call_sid, {}).get("conversation")
+#                 if conversation and hasattr(conversation, "terminate"):
+#                     await conversation.terminate()
+#                 else:
+#                     logger.warning(f"No conversation or terminate method for SID={call_sid}")
+#         return {"ok": True}
+#     except Exception as e:
+#         logger.error(f"/call_status failed: {e}")
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
+# # NEW: Endpoint to serve conversation JSON files
+# @app.get("/conversations/{call_sid}.json")
+# async def get_conversation(call_sid: str):
+#     path = CONVERSATIONS_DIR / f"{call_sid}.json"
+#     if path.exists():
+#         with open(path, "r", encoding="utf-8") as f:
+#             return json.load(f)
+#     raise HTTPException(status_code=404, detail="Conversation not found")
+
+
+# # ADDED n8n: request schema for outbound_call
+# class OutboundCallRequest(BaseModel):
+#     to_phone: str
+#     lead: Optional[Dict[str, Any]] = None
+#     transcript_callback_url: Optional[str] = None
+#     call_type: str = "qualification"
+#     agent_type: str = "chess_coach"
+#     initial_message: str = "Hello, this is a default message."
+#     prompt_preamble: str = ""
+
+# # ADDED n8n: normalize to E164 basic
+# def normalize_e164(number: str) -> str:
+#     n = re.sub(r'\D+', '', number or '')
+#     if not n:
+#         return number
+#     if n.startswith('0'):
+#         n = n.lstrip('0')
+#     if not n.startswith('+'):
+#         if len(n) == 10:
+#             n = '+91' + n
+#         else:
+#             n = '+' + n
+#     return n
+
+
+
+# # ADDED n8n: HTTP endpoint to start outbound call from n8n
+# @app.post("/outbound_call")
+# async def outbound_call(req: OutboundCallRequest):
+#     try:
+#         # CHANGED: richer logging of what arrived from n8n/CSV (safe heads only)
+#         logger.info(
+#             "OUTBOUND payload -> agent_type=%s | init_len=%d | init_head=%r | prompt_len=%d | prompt_head=%r",
+#             req.agent_type,
+#             len((req.initial_message or "")),
+#             (req.initial_message or "")[:120],
+#             len((req.prompt_preamble or "")),
+#             (req.prompt_preamble or "")[:120],
+#         )  # CHANGED
+
+#         to_phone = normalize_e164(req.to_phone)
+#         if not to_phone or len(to_phone) < 10:
+#             raise HTTPException(status_code=400, detail="Invalid phone")
+
+#         # Resolve the prompt: prefer CSV input; otherwise fall back by agent_type
+#         prompt_preamble = req.prompt_preamble or {
+#             "chess_coach": CHESS_COACH_PROMPT_PREAMBLE,
+#             "medical_sales": medical_sales_prompt,
+#             "hospital_receptionist": hospital_receptionist_prompt,
+#         }.get((req.agent_type or "").strip(), "")
+
+#         # Use the received prompt_preamble and initial_message directly
+#         agent_config = CustomLangchainAgentConfig(  # CHANGED: use custom config class
+#             initial_message=BaseMessage(text=req.initial_message or "Hello, this is a default message."),  # CHANGED
+#             prompt_preamble=prompt_preamble,  # CHANGED
+#             model_name="llama-3.1-8b-instant",
+#             api_key=GROQ_API_KEY,
+#             provider="groq",
+#         )
+
+#         # CHANGED: save config in the SAME manager TelephonyServer reads
+#         call_key = f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"  # CHANGED
+#         await telephony_server.config_manager.save_config(call_key, agent_config)  # CHANGED
+
+#         logger.info(
+#             "Saved agent under custom id: %s | agent_type=%s | init_head=%r | prompt_len=%d",
+#             call_key,
+#             req.agent_type,
+#             agent_config.initial_message.text[:120] if agent_config.initial_message else "",
+#             len(agent_config.prompt_preamble or ""),
+#         )  # CHANGED
+
+#         sid = await make_outbound_call(
+#             to_phone,
+#             req.call_type,
+#             req.lead,
+#             req.agent_type,
+#             agent_config,
+#             call_sid=call_key,
+#         )
+
+#         lead = req.lead or {}
+#         lead["to_phone"] = to_phone
+#         lead["agent_type"] = req.agent_type
+#         LEAD_CONTEXT_STORE[sid] = lead
+#         logger.info("Call SID=%s, agent_type=%s", sid, req.agent_type)
+#         if req.transcript_callback_url:
+#             os.environ["TRANSCRIPT_CALLBACK_URL"] = req.transcript_callback_url
+#         return {"ok": True, "call_sid": sid}
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.error("Error: %s", e)
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+# # Outbound call helper
+# async def make_outbound_call(
+#     to_phone: str,
+#     call_type: str,
+#     lead: dict = None,
+#     agent_type: str = "chess_coach",
+#     agent_config: AgentConfig = None,
+#     call_sid: str = None,
+# ):
+#     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+#     twilio_base_url = f"https://{BASE_URL}"
+
+#     # Use agent_config.initial_message if available, fallback to a minimal default
+#     initial_message = (
+#         agent_config.initial_message.text
+#         if agent_config and agent_config.initial_message
+#         else f"Hello, this is a generic message for {call_type}."
+#     )
+#     call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
+
+#     # CHANGED: make sure query has the correct key AND '=' sign; send both keys for compatibility
+#     twiml_url = f"{twilio_base_url}/inbound_call?call_sid={call_sid}&callsid={call_sid}"  # CHANGED
+
+#     call = await asyncio.get_event_loop().run_in_executor(
+#         None,
+#         lambda: client.calls.create(
+#             to=to_phone,
+#             from_=TWILIO_PHONE_NUMBER,
+#             url=twiml_url,
+#             status_callback=f"{twilio_base_url}/call_status",
+#             status_callback_method="POST",
+#             status_callback_event=["initiated", "ringing", "answered", "completed"],
+#             record=True,
+#             recording_channels="dual",
+#         ),
+#     )
+#     logger.info("Call initiated: TwilioSID=%s | type=%s | agent_type=%s", call.sid, call_type, agent_type)
+
+#     # CHANGED: mirror-save under Twilio’s real CallSid in the SAME manager
+#     try:
+#         if agent_config:
+#             await telephony_server.config_manager.save_config(call.sid, agent_config)  # CHANGED
+#         logger.info(
+#             "Mirrored agent for live call: custom_id=%s -> TwilioSID=%s | init_head=%r | prompt_len=%d",
+#             call_sid,
+#             call.sid,
+#             agent_config.initial_message.text[:120] if agent_config and agent_config.initial_message else "",
+#             len(agent_config.prompt_preamble or "") if agent_config else 0,
+#         )  # CHANGED
+#     except Exception as e:
+#         logger.warning("Failed to mirror agent under TwilioSID %s: %s", call.sid, e)  # CHANGED
+
+#     # Seed local stores for your dashboards (unchanged structure)
+#     if call_sid not in LEAD_CONTEXT_STORE:
+#         LEAD_CONTEXT_STORE[call_sid] = {"to_phone": to_phone, "call_type": call_type, "agent_type": agent_type, **(lead or {})}
+#     CONVERSATION_STORE.setdefault(
+#         call_sid,
+#         {
+#             "conversation_id": call_sid,
+#             "updated_at": int(time.time() * 1000),
+#             "lead": LEAD_CONTEXT_STORE.get(call_sid, {}),
+#             "slots": {},
+#             "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time() * 1000)}],
+#             "agent_config": agent_config,
+#         },
+#     )
+#     return call_sid
+
+
+
+
+
+# # In your CustomAgentFactory (e.g., in telephony_server setup)
+# def custom_agent_factory(conversation_id: str):
+#     config = config_manager.get_config(conversation_id) or CONVERSATION_STORE.get(conversation_id, {}).get("agent_config", default_agent_config)
+#     if not config.prompt_preamble:  # Fallback if no config
+#         config.prompt_preamble = "Default prompt if none provided."
+#     return CustomLangchainAgent(config)
+
+
+
+
+# def outbound_scheduler():
+#     while True:
+#         response = requests.get(CRM_API_URL, headers={"Authorization": f"Bearer {CRM_API_KEY}"})
+#         if response.status_code == 200:
+#             leads = response.json().get("leads", [])
+#             for lead in leads:
+#                 if lead.get("status") == "Call Pending":
+#                     call_type = lead.get("call_type", "qualification")
+#                     agent_type = lead.get("agent_type", "chess_coach")  # NEW: Support agent_type in scheduler
+#                     asyncio.run(make_outbound_call(lead["phone"], call_type, lead, agent_type))
+#                     update_crm(lead["id"], "", {}, {}, "", status="Calling")
+#         time.sleep(300)
+
+
+
+# # Main entrypoint (updated to include scheduler)
+# if __name__ == "__main__":
+#     import uvicorn
+
+#     def run_server():
+#         logger.debug("Starting Uvicorn server")
+#         uvicorn.run(app, host="0.0.0.0", port=3000)
+
+#     # Start outbound scheduler in a thread
+#     scheduler_thread = threading.Thread(target=outbound_scheduler, daemon=True)
+#     scheduler_thread.start()
+
+#     run_server()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import os
 import logging
 import asyncio
 import httpx
 import typing
 import time
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Any, Dict
 from fastapi import FastAPI, Request, Response
 from fastapi.logger import logger as fastapi_logger
 from contextlib import asynccontextmanager
@@ -10898,9 +12416,6 @@ os.environ['PATH'] += os.pathsep + 'C:\\ffmpeg\\bin'
 
 load_dotenv()
 
-
-
-
 # Environment variables
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
@@ -10939,8 +12454,8 @@ if not all(required_vars):
     raise ValueError("Missing required environment variables in .env file. Required: GROQ_API_KEY, DEEPGRAM_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, BASE_URL")
 
 # Validate Ngrok URL
-if not BASE_URL.endswith((".ngrok-free.app", ".ngrok.io", ".onrender.com")):
-    logger.warning(f"BASE_URL ({BASE_URL}) does not appear to be a valid URL. Ensure it matches the current session.")
+if not BASE_URL.endswith((".ngrok-free.app", ".ngrok.io")):
+    logger.warning(f"BASE_URL ({BASE_URL}) does not appear to be a valid Ngrok URL. Ensure it matches the current Ngrok session and is updated in Twilio Console.")
 
 CHESS_COACH_PROMPT_PREAMBLE = """
 # Chess Coaching Sales Representative Prompt
@@ -11061,307 +12576,12 @@ Your primary purpose is to qualify leads who have shown interest in chess coachi
 Your goal is to qualify chess coaches for Bangalore schools, ensure they understand and are excited about the opportunity, and maintain 4champz’s professional reputation. Prioritize accurate qualification, scheduling, and enthusiasm across all call types.
 """
 
-
-
-medical_sales_prompt="""
-# Medical Sales Representative Prompt
-## Identity & Purpose
-You are Sarah, a virtual sales representative for MediShop, a leading medical supplies provider based in Bengaluru, India. We specialize in providing high-quality medical equipment, consumables, and services to clinics, hospitals, and individual practitioners across Bangalore.
-Your primary purpose is to qualify leads who have shown interest in medical supplies, understand their needs and current setup, explore potential partnerships or sales opportunities, handle FAQs, and schedule follow-up meetings for both inbound and outbound calls.
-
-## Voice & Persona
-### Personality
-- Sound professional, empathetic, and knowledgeable—like a trusted healthcare advisor
-- Project genuine interest in understanding their medical supply needs
-- Maintain a courteous and solution-oriented demeanor throughout the conversation
-- Show respect for their time while focusing on their requirements for medical equipment
-- Convey enthusiasm about helping healthcare providers improve patient care through quality supplies
-
-### Speech Characteristics
-- Use clear, concise, and professional language with a supportive tone
-- Keep messages under 150 characters when possible
-- Include probing questions to gather detailed information about their needs
-- Show genuine interest in their current setup and challenges
-- Use encouraging language when discussing potential solutions or partnerships
-
-## Conversation Flow
-### Introduction
-1. For inbound: "Hello {{name}}, this is Sarah from MediShop. Do you have 5-10 minutes to discuss medical supply solutions for your practice?"
-2. For outbound: "Hello {{name}}, this is Sarah from MediShop. I’m reaching out due to your interest in medical supplies. Available to discuss?"
-3. Follow with: "I’d love to understand your current needs, answer FAQs like pricing or delivery, or assist with reminders if applicable."
-
-### FAQs Handling
-- Pricing: "Our medical supplies start at competitive rates, tailored to your needs. Interested in a detailed quote?"
-- Delivery: "We offer same-day delivery in Bangalore for urgent orders. Want to discuss timelines?"
-- Products: "We provide equipment, consumables, and maintenance services. Any specific needs?"
-
-### Current Needs Assessment
-- Location: "Could you confirm your clinic or hospital’s location in Bangalore?"
-- Current Setup: "What medical supplies or equipment are you currently using?"
-- Needs: "Are you looking for specific equipment, like diagnostic tools or consumables?"
-
-### Qualification Questions
-- Volume: "What’s your typical monthly usage of medical consumables?"
-- Budget: "Do you have a budget range for new equipment or supplies?"
-- Decision Maker: "Are you the primary decision-maker for purchasing supplies?"
-- Current Suppliers: "Who are your current suppliers, and any challenges with them?"
-
-### Sales Opportunity Exploration
-- Explain: "We offer tailored solutions for clinics and hospitals, with training and support."
-- Customization: "Need specific equipment or bulk discounts? We can customize."
-- Support: "We provide maintenance and training. Interested in learning more?"
-- Partnerships: "Interested in a long-term partnership for consistent supply?"
-
-### Scheduling
-- If interested: "Let’s schedule a detailed discussion or demo. When are you free this week?"
-- Use check_calendar_availability and book_appointment.
-- Confirm: "Please provide your full name, email, and preferred time."
-
-### Close
-- Positive: "Thank you, {{name}}. We’ll send details and a confirmation. Excited to assist!"
-- End with end_call unless transferred
-
-## Response Guidelines
-- Handle FAQs before diving into qualification if asked
-- Use IST timing for scheduling (e.g., today is 03:46 PM IST, Tuesday, September 23, 2025)
-- Ask one question at a time to avoid overwhelming them
-- Keep responses focused on qualifying their suitability for MediShop’s offerings
-- Ask location-specific questions about Bangalore areas for delivery logistics
-- Show enthusiasm for solving their supply chain challenges
-- Be respectful of their busy schedules and operational constraints
-- Emphasize the opportunity to enhance patient care with reliable supplies
-
-## Scenario Handling
-### Interested Leads
-- Enthusiasm: "Your needs align perfectly with our offerings! Let’s connect you with a sales rep."
-- Route: Use transfer_call to sales rep.
-
-### Support Queries
-- Detect: If "support" or "help" in input, say "Let me route you to our support team."
-- Route: Use transfer_call to support.
-
-### Reminders
-- Meeting: "This is a reminder for your demo on [date/time]. Ready to proceed?" (e.g., use current date + 1 day if unspecified)
-- Payment: "This is a payment reminder for your invoice due by [date]. Settled?" (e.g., use current date + 1 day if unspecified)
-
-### For High-Volume Buyers
-- Express enthusiasm: "Your usage volume is impressive! We can offer tailored discounts."
-- Fast-track process: "Given your needs, let’s expedite a detailed quote. When’s best?"
-- Highlight premium offerings: "Our premium equipment and bulk deals could be ideal."
-
-### For Small Clinics or New Buyers
-- Explore potential: "Even small setups benefit from our flexible plans. Tell me about your needs."
-- Support emphasis: "We provide training and support to ease transitions. Interested?"
-- Alternative solutions: "Interested in starter kits or trial orders?"
-
-### For Delivery or Logistics Concerns
-- Flexible scheduling: "We can adjust delivery times to suit you. What works best?"
-- Local support: "We have local teams in Bangalore. Which areas are you in?"
-- Assurance: "Our logistics ensure timely delivery. Want to discuss specifics?"
-
-### For Candidates Requesting Human Assistance
-- If they want human help or details on contracts/partnerships:
-  - Use transfer_call
-  - Say: "Of course! Let me connect you with our sales manager for detailed discussions."
-
-## Knowledge Base
-### Caller Info
-- name: {{name}}, email: {{email}}, phone_number: {{phone_number}}, role: {{role}}
-
-### MediShop Model
-- Leading medical supplies provider in Bengaluru, serving clinics and hospitals
-- Offers equipment, consumables, maintenance, and training
-- Focuses on reliable, high-quality supplies to improve patient care
-
-### Requirements
-- Clear understanding of current supply needs and budget
-- Located in Bangalore with ability to receive deliveries
-- Professional communication and decision-making authority
-
-### Assessment Criteria
-- Monthly supply volume and budget
-- Current suppliers and satisfaction levels
-- Specific equipment or consumable needs
-- Decision-making role and authority
-- Language capabilities (English/Kannada/Hindi)
-- Delivery location and logistics preferences
-
-## Response Refinement
-- When discussing needs: "Your setup sounds interesting. Could you share more about [specific need]?"
-- When explaining offerings: "Let me share how MediShop can streamline your supply chain..."
-- When confirming details: "To confirm—your needs are [needs] and delivery is to [location]. Correct?"
-
-## Call Management
-### Available Functions
-- check_calendar_availability: Use for scheduling follow-up meetings
-- book_appointment: Use to confirm scheduled appointments
-- transfer_call: Use when candidate requests human assistance
-- end_call: Use to conclude every conversation
-
-## Technical Considerations
-- If calendar delays occur: "I’m checking available slots. This will take a moment."
-- If multiple scheduling needs: "Let’s book your appointment first, then address other questions."
-- Always confirm appointment details before ending: "To confirm, we’re scheduled for [day], [date] at [time IST]. You’ll receive an email."
-
----
-Your goal is to qualify leads for medical supply sales, ensure they understand MediShop’s value, and maintain a professional reputation. Prioritize accurate qualification, scheduling, and enthusiasm across all call types.
-
-"""
-
-
-
-hospital_receptionist_prompt="""
-# Hospital Receptionist Prompt
-## Identity & Purpose
-You are Emma, a virtual receptionist for City Hospital, a premier healthcare facility in Bengaluru, India. We provide comprehensive medical services, including consultations, diagnostics, and surgeries, to patients across Bangalore.
-Your primary purpose is to assist callers with scheduling appointments, answering general inquiries about hospital services, directing calls to appropriate departments, and handling FAQs for both inbound and outbound calls.
-
-## Voice & Persona
-### Personality
-- Sound calm, professional, and empathetic—like a caring healthcare professional
-- Project genuine interest in helping callers with their medical needs
-- Maintain a patient and reassuring demeanor throughout the conversation
-- Show respect for their urgency while addressing their inquiries efficiently
-- Convey confidence in City Hospital’s ability to provide excellent care
-
-### Speech Characteristics
-- Use clear, soothing, and professional language with a supportive tone
-- Keep messages under 150 characters when possible
-- Include clarifying questions to understand their needs
-- Show empathy for their health concerns or questions
-- Use reassuring language when addressing inquiries or scheduling
-
-## Conversation Flow
-### Introduction
-1. For inbound: "Hello {{name}}, this is Emma from City Hospital. How can I assist with your appointment or inquiry today?"
-2. For outbound: "Hello {{name}}, this is Emma from City Hospital. I’m following up on your inquiry. Available to discuss?"
-3. Follow with: "I can help schedule appointments, answer questions about services, or connect you to a department."
-
-### FAQs Handling
-- Appointment Process: "Appointments can be booked online or by phone. Want to schedule one now?"
-- Services: "We offer consultations, diagnostics, and surgeries. Need details on a specific service?"
-- Visiting Hours: "Visiting hours are 10 AM–8 PM. Need directions or parking info?"
-
-### Caller Needs Assessment
-- Location: "Could you confirm if you’re visiting our Bangalore branch?"
-- Purpose: "Are you scheduling an appointment, seeking information, or needing support?"
-- Urgency: "Is this an urgent medical need, or a routine visit?"
-
-### Appointment Scheduling
-- Department: "Which department or doctor would you like to see?"
-- Availability: "When are you available for an appointment?"
-- Details: "Please provide your full name, contact details, and preferred time."
-
-### Inquiry Handling
-- Explain: "City Hospital offers comprehensive care with top specialists."
-- Specifics: "Need info on specific treatments, like cardiology or orthopedics?"
-- Support: "I can connect you to our patient support team if needed."
-
-### Scheduling
-- If scheduling: "Let’s book your appointment. When are you free this week?"
-- Use check_calendar_availability and book_appointment.
-- Confirm: "Please confirm your full name, email, and preferred time."
-
-### Close
-- Positive: "Thank you, {{name}}. Your appointment is confirmed, and details will be sent. Wishing you well!"
-- End with end_call unless transferred
-
-## Response Guidelines
-- Handle FAQs before diving into scheduling or inquiries if asked
-- Use IST timing for scheduling (e.g., today is 03:46 PM IST, Tuesday, September 23, 2025)
-- Ask one question at a time to avoid overwhelming callers
-- Keep responses focused on assisting with their immediate needs
-- Ask location-specific questions about Bangalore for in-person visits
-- Show empathy for health concerns and urgency
-- Be respectful of their time and potential stress
-- Emphasize City Hospital’s commitment to patient care
-
-## Scenario Handling
-### Urgent Medical Inquiries
-- Urgency: "For emergencies, please visit our ER or call our hotline. Need directions?"
-- Route: Use transfer_call to emergency department if urgent.
-
-### Support Queries
-- Detect: If "support" or "complaint" in input, say "Let me connect you to our patient support team."
-- Route: Use transfer_call to support.
-
-### Reminders
-- Appointment: "This is a reminder for your appointment on [date/time]. Confirm or reschedule?" (e.g., use current date + 1 day if unspecified)
-- Follow-up: "This is a follow-up for your recent inquiry. Ready to proceed?"
-
-### For First-Time Patients
-- Reassurance: "First visits are seamless with our support. Tell me about your needs."
-- Guidance: "We’ll guide you through the process. Need help with registration?"
-- Options: "Interested in a consultation or diagnostic services?"
-
-### For Returning Patients
-- History: "Welcome back! Have you visited us before for [specific service]?"
-- Fast-track: "Let’s quickly schedule your next appointment. When’s convenient?"
-- Loyalty: "As a returning patient, we prioritize your care. Any specific needs?"
-
-### For Logistical Concerns
-- Flexible scheduling: "We can adjust appointment times. What works for you?"
-- Directions: "We’re located in Bangalore. Need directions to our facility?"
-- Transport: "Need help with parking or transport options?"
-
-### For Callers Requesting Human Assistance
-- If they want human help or detailed medical advice:
-  - Use transfer_call
-  - Say: "Let me connect you with our patient coordinator for further assistance."
-
-## Knowledge Base
-### Caller Info
-- name: {{name}}, email: {{email}}, phone_number: {{phone_number}}, role: {{role}}
-
-### City Hospital Model
-- Premier healthcare facility in Bengaluru, offering consultations, diagnostics, and surgeries
-- Partners with top specialists and provides patient support
-- Focuses on accessible, high-quality healthcare
-
-### Requirements
-- Clear understanding of caller’s medical or appointment needs
-- Located in or able to visit Bangalore
-- Basic contact information for scheduling
-
-### Assessment Criteria
-- Purpose of call (appointment, inquiry, support)
-- Preferred department or doctor
-- Urgency of medical needs
-- Contact details and availability
-- Language capabilities (English/Kannada/Hindi)
-- Accessibility to Bangalore facility
-
-## Response Refinement
-- When discussing needs: "I understand your concern. Could you share more about [specific need]?"
-- When explaining services: "Let me explain how City Hospital can assist you..."
-- When confirming details: "To confirm—your appointment is for [service] at [time]. Correct?"
-
-## Call Management
-### Available Functions
-- check_calendar_availability: Use for scheduling appointments
-- book_appointment: Use to confirm scheduled appointments
-- transfer_call: Use when caller requests human assistance
-- end_call: Use to conclude every conversation
-
-## Technical Considerations
-- If calendar delays occur: "I’m checking available slots. This will take a moment."
-- If multiple scheduling needs: "Let’s book your appointment first, then address other questions."
-- Always confirm appointment details before ending: "To confirm, we’re scheduled for [day], [date] at [time IST]. You’ll receive an email."
-
----
-Your goal is to assist callers efficiently, ensure they feel supported, and maintain City Hospital’s reputation for excellent patient care. Prioritize accurate scheduling, empathy, and clear communication across all call types.
-
-"""
-
-
-
 # Groq LLM setup
 llm = ChatGroq(model_name="llama-3.1-8b-instant")
 # llm = ChatGroq(model_name="groq/compound-mini")
 
 # Config Manager
 config_manager = InMemoryConfigManager()
-shared_config_manager = InMemoryConfigManager()  # CHANGED
 
 # ADDED for JSON capture with LLM extraction: global in-memory store
 CONVERSATION_STORE: dict = {}  # ADDED for JSON LLM extraction
@@ -11957,26 +13177,13 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
 # Custom Agent Factory
 class CustomAgentFactory:
     def create_agent(self, agent_config: AgentConfig, logger: Optional[logging.Logger] = None) -> BaseAgent:
-        log = logger or globals().get("logger", logging.getLogger(__name__))
-        log.debug("Creating agent with config type: %s", agent_config.type)
-        # CHANGED: print the resolved config that TelephonyServer is about to use
-        try:
-            init_head = getattr(getattr(agent_config, "initial_message", None), "text", "")
-            init_head = (init_head or "")[:120]
-            prompt = getattr(agent_config, "prompt_preamble", "") or ""
-            prompt_len = len(prompt)
-            prompt_head = prompt[:120]
-            log.info("Factory using -> init_head=%r | prompt_len=%d | prompt_head=%r", init_head, prompt_len, prompt_head)  # CHANGED
-        except Exception as e:
-            log.warning("Factory logging failed: %s", e)  # CHANGED
-
+        log = logger or globals().get('logger', logging.getLogger(__name__))
+        log.debug(f"Creating agent with config type: {agent_config.type}")
         if agent_config.type == "agent_langchain":
             log.debug("Creating CustomLangchainAgent")
             return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
-        log.error("Invalid agent config type: %s", agent_config.type)
+        log.error(f"Invalid agent config type: {agent_config.type}")
         raise Exception(f"Invalid agent config: {agent_config.type}")
-
-
 
 # Custom Synthesizer Factory
 class CustomSynthesizerFactory:
@@ -12015,7 +13222,8 @@ app.router.lifespan_context = lifespan
 # Twilio config
 twilio_config = TwilioConfig(
     account_sid=TWILIO_ACCOUNT_SID,
-    auth_token=TWILIO_AUTH_TOKEN
+    auth_token=TWILIO_AUTH_TOKEN,
+    phone_number=TWILIO_PHONE_NUMBER
 )
 
 # Synthesizer config (telephone voice output)
@@ -12034,11 +13242,11 @@ transcriber_config = DeepgramTranscriberConfig(
     downsampling=1,
 )
 
-# Default config as a fallback
-default_agent_config = LangchainAgentConfig(
-    initial_message=BaseMessage(text="Hello, this is a default message."),
-    prompt_preamble="",
+agent_config = LangchainAgentConfig(
+    initial_message=BaseMessage(text="Hello, this is Priya from 4champz, a leading chess coaching service in Bengaluru. Do you have 5-10 minutes to discuss some exciting chess coaching opportunities with schools in Bangalore?"),
+    prompt_preamble=CHESS_COACH_PROMPT_PREAMBLE,
     model_name="llama-3.1-8b-instant",
+    # model_name="groq/compound-mini",
     api_key=GROQ_API_KEY,
     provider="groq",
 )
@@ -12053,11 +13261,10 @@ telephony_server = TelephonyServer(
         TwilioInboundCallConfig(
             url="/inbound_call",
             twilio_config=twilio_config,
-            config_manager=shared_config_manager, 
-            agent_config=default_agent_config,  # NEW: Use default for inbound calls
+            config_manager=config_manager,
+            agent_config=agent_config,
             synthesizer_config=synthesizer_config,
             transcriber_config=transcriber_config,  # Use instance
-            agent_factory=CustomAgentFactory(),
             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
@@ -12079,30 +13286,14 @@ telephony_server = TelephonyServer(
 app.include_router(telephony_server.get_router())
 
 
-# Fix call_status to handle empty JSON
+# NEW: Endpoint to handle Twilio call status callbacks for inbound calls
 @app.post("/call_status")
 async def call_status(request: Request):
-    try:
-        # Twilio sends application/x-www-form-urlencoded by default
-        form = await request.form()
-        call_sid = form.get("CallSid")
-        status = form.get("CallStatus")
-        recording_sid = form.get("RecordingSid")
-        recording_url = form.get("RecordingUrl")
-        logger.info(f"Call status update: SID={call_sid}, Status={status}, RecSid={recording_sid}, RecUrl={recording_url}")
-
-        if call_sid and call_sid in CONVERSATION_STORE:
-            CONVERSATION_STORE[call_sid]["status"] = status
-            if status in ["completed", "failed", "no-answer", "busy"]:
-                conversation = CONVERSATION_STORE.get(call_sid, {}).get("conversation")
-                if conversation and hasattr(conversation, "terminate"):
-                    await conversation.terminate()
-                else:
-                    logger.warning(f"No conversation or terminate method for SID={call_sid}")
-        return {"ok": True}
-    except Exception as e:
-        logger.error(f"/call_status failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    data = await request.json()
+    call_sid = data.get("CallSid")
+    if data.get("CallStatus") == "completed":
+        logger.info(f"Inbound call {call_sid} completed")
+    return {"ok": True}
 
 
 # NEW: Endpoint to serve conversation JSON files
@@ -12125,6 +13316,8 @@ class OutboundCallRequest(BaseModel):
     initial_message: str = "Hello, this is a default message."
     prompt_preamble: str = ""
 
+
+
 # ADDED n8n: normalize to E164 basic
 def normalize_e164(number: str) -> str:
     n = re.sub(r'\D+', '', number or '')
@@ -12139,102 +13332,73 @@ def normalize_e164(number: str) -> str:
             n = '+' + n
     return n
 
-
-
 # ADDED n8n: HTTP endpoint to start outbound call from n8n
 @app.post("/outbound_call")
 async def outbound_call(req: OutboundCallRequest):
     try:
-        # CHANGED: richer logging of what arrived from n8n/CSV (safe heads only)
         logger.info(
             "OUTBOUND payload -> agent_type=%s | init_len=%d | init_head=%r | prompt_len=%d | prompt_head=%r",
             req.agent_type,
-            len((req.initial_message or "")),
+            len(req.initial_message or ""),
             (req.initial_message or "")[:120],
-            len((req.prompt_preamble or "")),
+            len(req.prompt_preamble or ""),
             (req.prompt_preamble or "")[:120],
-        )  # CHANGED
-
+        )
         to_phone = normalize_e164(req.to_phone)
         if not to_phone or len(to_phone) < 10:
             raise HTTPException(status_code=400, detail="Invalid phone")
+        
+        agent_type = req.agent_type.strip()
+        initial_message = req.initial_message.strip()
+        prompt_preamble = req.prompt_preamble.strip()
 
-        # Resolve the prompt: prefer CSV input; otherwise fall back by agent_type
-        prompt_preamble = req.prompt_preamble or {
-            "chess_coach": CHESS_COACH_PROMPT_PREAMBLE,
-            "medical_sales": medical_sales_prompt,
-            "hospital_receptionist": hospital_receptionist_prompt,
-        }.get((req.agent_type or "").strip(), "")
-
-        # Use the received prompt_preamble and initial_message directly
-        agent_config = CustomLangchainAgentConfig(  # CHANGED: use custom config class
-            initial_message=BaseMessage(text=req.initial_message or "Hello, this is a default message."),  # CHANGED
-            prompt_preamble=prompt_preamble,  # CHANGED
+        agent_config = LangchainAgentConfig(
+            initial_message=BaseMessage(text=initial_message),
+            prompt_preamble=prompt_preamble,
             model_name="llama-3.1-8b-instant",
             api_key=GROQ_API_KEY,
             provider="groq",
         )
 
-        # CHANGED: save config in the SAME manager TelephonyServer reads
-        call_key = f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"  # CHANGED
-        await telephony_server.config_manager.save_config(call_key, agent_config)  # CHANGED
 
-        logger.info(
-            "Saved agent under custom id: %s | agent_type=%s | init_head=%r | prompt_len=%d",
-            call_key,
-            req.agent_type,
-            agent_config.initial_message.text[:120] if agent_config.initial_message else "",
-            len(agent_config.prompt_preamble or ""),
-        )  # CHANGED
+        call_key = f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
 
-        sid = await make_outbound_call(
-            to_phone,
-            req.call_type,
-            req.lead,
-            req.agent_type,
-            agent_config,
-            call_sid=call_key,
-        )
+        # CHANGED: await save to shared config_manager singleton for consistency
+        res = config_manager.save_config(call_key, agent_config)
+        if asyncio.iscoroutine(res):
+            await res
+
+        logger.info(f"Saved agent under call_key {call_key} with init_message head: {initial_message[:120]}")
+
+
+
+        sid = await make_outbound_call(to_phone, req.call_type, req.lead, agent_type, agent_config, call_sid=call_key)
 
         lead = req.lead or {}
         lead["to_phone"] = to_phone
-        lead["agent_type"] = req.agent_type
         LEAD_CONTEXT_STORE[sid] = lead
-        logger.info("Call SID=%s, agent_type=%s", sid, req.agent_type)
+        logger.info(f"Outbound call requested via n8n: SID={sid}, lead={lead}")
         if req.transcript_callback_url:
             os.environ["TRANSCRIPT_CALLBACK_URL"] = req.transcript_callback_url
         return {"ok": True, "call_sid": sid}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error: %s", e)
+        logger.error(f"/outbound_call failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-
-
 # Outbound call helper
-async def make_outbound_call(
-    to_phone: str,
-    call_type: str,
-    lead: dict = None,
-    agent_type: str = "chess_coach",
-    agent_config: AgentConfig = None,
-    call_sid: str = None,
-):
+async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_type: str, agent_config: AgentConfig, call_sid: str = None):
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     twilio_base_url = f"https://{BASE_URL}"
+    
+    initial_message = agent_config.initial_message.text if agent_config.initial_message else f"Hello, this is a generic message for {call_type}."
 
-    # Use agent_config.initial_message if available, fallback to a minimal default
-    initial_message = (
-        agent_config.initial_message.text
-        if agent_config and agent_config.initial_message
-        else f"Hello, this is a generic message for {call_type}."
-    )
     call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
 
-    # CHANGED: make sure query has the correct key AND '=' sign; send both keys for compatibility
-    twiml_url = f"{twilio_base_url}/inbound_call?call_sid={call_sid}&callsid={call_sid}"  # CHANGED
+    twiml_url = f"{twilio_base_url}/inbound_call?call_sid={call_sid}"
+
 
     call = await asyncio.get_event_loop().run_in_executor(
         None,
@@ -12247,69 +13411,43 @@ async def make_outbound_call(
             status_callback_event=["initiated", "ringing", "answered", "completed"],
             record=True,
             recording_channels="dual",
-        ),
+        )
     )
-    logger.info("Call initiated: TwilioSID=%s | type=%s | agent_type=%s", call.sid, call_type, agent_type)
+    logger.info(f"Call initiated: TwilioSID={call.sid} | type={call_type} | agent_type={agent_type}")
 
-    # CHANGED: mirror-save under Twilio’s real CallSid in the SAME manager
-    try:
-        if agent_config:
-            await telephony_server.config_manager.save_config(call.sid, agent_config)  # CHANGED
-        logger.info(
-            "Mirrored agent for live call: custom_id=%s -> TwilioSID=%s | init_head=%r | prompt_len=%d",
-            call_sid,
-            call.sid,
-            agent_config.initial_message.text[:120] if agent_config and agent_config.initial_message else "",
-            len(agent_config.prompt_preamble or "") if agent_config else 0,
-        )  # CHANGED
-    except Exception as e:
-        logger.warning("Failed to mirror agent under TwilioSID %s: %s", call.sid, e)  # CHANGED
+    res2 = config_manager.save_config(call.sid, agent_config)
+    if asyncio.iscoroutine(res2):
+        await res2
 
-    # Seed local stores for your dashboards (unchanged structure)
-    if call_sid not in LEAD_CONTEXT_STORE:
-        LEAD_CONTEXT_STORE[call_sid] = {"to_phone": to_phone, "call_type": call_type, "agent_type": agent_type, **(lead or {})}
-    CONVERSATION_STORE.setdefault(
-        call_sid,
-        {
-            "conversation_id": call_sid,
-            "updated_at": int(time.time() * 1000),
-            "lead": LEAD_CONTEXT_STORE.get(call_sid, {}),
-            "slots": {},
-            "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time() * 1000)}],
-            "agent_config": agent_config,
-        },
-    )
-    return call_sid
+    logger.info(f"Mirrored agent save: custom_id={call_sid} -> TwilioSID={call.sid} with init_message head: {agent_config.initial_message.text[:120]}")
+
+
+    if call.sid not in LEAD_CONTEXT_STORE:
+        LEAD_CONTEXT_STORE[call.sid] = {"to_phone": to_phone, "call_type": call_type, **(lead or {})}
+    CONVERSATION_STORE.setdefault(call.sid, {
+        "conversation_id": call.sid,
+        "updated_at": int(time.time()*1000),
+        "lead": LEAD_CONTEXT_STORE.get(call.sid, {}),
+        "slots": {},
+        "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}]
+    })
+    return call.sid
 
 
 
 
-
-# In your CustomAgentFactory (e.g., in telephony_server setup)
-def custom_agent_factory(conversation_id: str):
-    config = config_manager.get_config(conversation_id) or CONVERSATION_STORE.get(conversation_id, {}).get("agent_config", default_agent_config)
-    if not config.prompt_preamble:  # Fallback if no config
-        config.prompt_preamble = "Default prompt if none provided."
-    return CustomLangchainAgent(config)
-
-
-
-
+# NEW: Outbound Call Scheduler (for auto-dialing from CRM)
 def outbound_scheduler():
     while True:
         response = requests.get(CRM_API_URL, headers={"Authorization": f"Bearer {CRM_API_KEY}"})
         if response.status_code == 200:
-            leads = response.json().get("leads", [])
+            leads = response.json().get("leads", [])  # Adjusted to 'leads' for generality
             for lead in leads:
                 if lead.get("status") == "Call Pending":
                     call_type = lead.get("call_type", "qualification")
-                    agent_type = lead.get("agent_type", "chess_coach")  # NEW: Support agent_type in scheduler
-                    asyncio.run(make_outbound_call(lead["phone"], call_type, lead, agent_type))
+                    asyncio.run(make_outbound_call(lead["phone"], call_type, lead))
                     update_crm(lead["id"], "", {}, {}, "", status="Calling")
-        time.sleep(300)
-
-
-
+        time.sleep(300)  # Poll every 5 minutes
 # Main entrypoint (updated to include scheduler)
 if __name__ == "__main__":
     import uvicorn

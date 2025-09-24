@@ -10835,7 +10835,7 @@ import asyncio
 import httpx
 import typing
 import time
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Any
 from fastapi import FastAPI, Request, Response
 from fastapi.logger import logger as fastapi_logger
 from contextlib import asynccontextmanager
@@ -10897,6 +10897,9 @@ fastapi_logger.setLevel(logging.DEBUG)
 os.environ['PATH'] += os.pathsep + 'C:\\ffmpeg\\bin'
 
 load_dotenv()
+
+
+
 
 # Environment variables
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -12115,8 +12118,8 @@ async def get_conversation(call_sid: str):
 # ADDED n8n: request schema for outbound_call
 class OutboundCallRequest(BaseModel):
     to_phone: str
-    lead: typing.Optional[typing.Dict[str, typing.Any]] = None
-    transcript_callback_url: typing.Optional[str] = None
+    lead: Optional[Dict[str, Any]] = None
+    transcript_callback_url: Optional[str] = None
     call_type: str = "qualification"
     agent_type: str = "chess_coach"
     initial_message: str = "Hello, this is a default message."
@@ -12174,7 +12177,7 @@ async def outbound_call(req: OutboundCallRequest):
 
         # CHANGED: save config in the SAME manager TelephonyServer reads
         call_key = f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"  # CHANGED
-        telephony_server.config_manager.save_config(call_key, agent_config)  # CHANGED
+        await telephony_server.config_manager.save_config(call_key, agent_config)  # CHANGED
 
         logger.info(
             "Saved agent under custom id: %s | agent_type=%s | init_head=%r | prompt_len=%d",
@@ -12251,7 +12254,7 @@ async def make_outbound_call(
     # CHANGED: mirror-save under Twilio’s real CallSid in the SAME manager
     try:
         if agent_config:
-            telephony_server.config_manager.save_config(call.sid, agent_config)  # CHANGED
+            await telephony_server.config_manager.save_config(call.sid, agent_config)  # CHANGED
         logger.info(
             "Mirrored agent for live call: custom_id=%s -> TwilioSID=%s | init_head=%r | prompt_len=%d",
             call_sid,

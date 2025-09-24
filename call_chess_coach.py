@@ -12064,13 +12064,13 @@ app.include_router(telephony_server.get_router())
 @app.post("/call_status")
 async def call_status(request: Request):
     try:
-        # CHANGED: Twilio sends application/x-www-form-urlencoded by default
-        form = await request.form()  # CHANGED
-        call_sid = form.get("CallSid")  # CHANGED
-        status = form.get("CallStatus")  # CHANGED
-        recording_sid = form.get("RecordingSid")  # CHANGED (optional)
-        recording_url = form.get("RecordingUrl")  # CHANGED (optional)
-        logger.info(f"Call status update: SID={call_sid}, Status={status}, RecSid={recording_sid}, RecUrl={recording_url}")  # CHANGED
+        # Twilio sends application/x-www-form-urlencoded by default
+        form = await request.form()
+        call_sid = form.get("CallSid")
+        status = form.get("CallStatus")
+        recording_sid = form.get("RecordingSid")
+        recording_url = form.get("RecordingUrl")
+        logger.info(f"Call status update: SID={call_sid}, Status={status}, RecSid={recording_sid}, RecUrl={recording_url}")
 
         if call_sid and call_sid in CONVERSATION_STORE:
             CONVERSATION_STORE[call_sid]["status"] = status
@@ -12130,14 +12130,14 @@ async def outbound_call(req: OutboundCallRequest):
             raise HTTPException(status_code=400, detail="Invalid phone")
 
 
-        # Dynamically create agent_config based on agent_type
+        # Force CSV/n8n values; no fallback
         prompt_preamble = req.prompt_preamble
-        if not prompt_preamble:
-            prompt_preamble = {
-                "chess_coach": CHESS_COACH_PROMPT_PREAMBLE,
-                "medical_sales": medical_sales_prompt,
-                "hospital_receptionist": hospital_receptionist_prompt
-            }.get(req.agent_type, "")
+        if not prompt_preamble or not prompt_preamble.strip():
+            raise HTTPException(status_code=400, detail="prompt_preamble is required (from CSV/n8n)")
+        initial_message = req.initial_message
+        if not initial_message or not initial_message.strip():
+            raise HTTPException(status_code=400, detail="initial_message is required (from CSV/n8n)")
+
 
         # Use the received prompt_preamble and initial_message directly
         agent_config = CustomLangchainAgentConfig(  # CHANGED: use custom config class
@@ -12173,7 +12173,7 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
     twilio_base_url = f"https://{BASE_URL}"
     # Use agent_config.initial_message if available, fallback to a minimal default
     initial_message = agent_config.initial_message.text if agent_config and agent_config.initial_message else f"Hello, this is a generic message for {call_type}."
-    call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"  # Use provided call_sid or generate a new one
+    call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
     call = await asyncio.get_event_loop().run_in_executor(
         None,
         lambda: client.calls.create(
@@ -12188,7 +12188,20 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
         )
     )
     logger.info(f"Call initiated: SID={call.sid}, type={call_type}, agent_type={agent_type}")
-    # call_sid = call.sid
+
+    # CHANGED: also save under Twilio’s real CallSid so TelephonyServer finds the dynamic persona
+    try:
+        if agent_config:
+            config_manager.save_config(call.sid, agent_config)  # CHANGED: mirror-save under Twilio SID
+        if call_sid != call.sid:
+            # CHANGED: mirror lead/context for consistency during events keyed by Twilio SID
+            if call_sid in LEAD_CONTEXT_STORE:
+                LEAD_CONTEXT_STORE[call.sid] = dict(LEAD_CONTEXT_STORE[call_sid])  # CHANGED
+            if call_sid in CONVERSATION_STORE:
+                CONVERSATION_STORE[call.sid] = dict(CONVERSATION_STORE[call_sid])  # CHANGED
+    except Exception as e:
+        logger.warning(f"Failed to mirror config/context to Twilio SID {call.sid}: {e}")  # CHANGED
+
     if call_sid not in LEAD_CONTEXT_STORE:
         LEAD_CONTEXT_STORE[call_sid] = {"to_phone": to_phone, "call_type": call_type, "agent_type": agent_type, **(lead or {})}
     CONVERSATION_STORE.setdefault(call_sid, {
@@ -12200,6 +12213,10 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
         "agent_config": agent_config  # Store agent_config for the conversation
     })
     return call_sid
+
+
+
+
 
 # In your CustomAgentFactory (e.g., in telephony_server setup)
 def custom_agent_factory(conversation_id: str):

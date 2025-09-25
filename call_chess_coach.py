@@ -13343,7 +13343,7 @@ async def set_agent_config(agent_data: AgentConfigInput):
         provider="groq",
     )
     stored_agent_configs[agent_id] = agent_config
-    logger.info(f"Stored new agent config under ID {agent_id} for type {agent_config_input.agent_type}")
+    # logger.info(f"Stored new agent config under ID {agent_id} for type {agent_config_input.agent_type}")
     return {"agent_id": agent_id}
 
 

@@ -12941,6 +12941,196 @@ class CustomLangchainAgent(LangchainAgent):
         await self.send_message(BaseMessage(text=twiml_response), conversation_id)  # Use existing send_message to pass TwiML
         logger.info(f"Call ended for conversation_id: {conversation_id}")
 
+    # async def respond(self, human_input: str, conversation_id: str, is_interrupt: bool = False) -> Tuple[Optional[str], bool]:
+    #     try:
+    #         start_time = time.time()
+
+    #         if conversation_id and self.conversation_id_cache != conversation_id:
+    #             self.conversation_id_cache = conversation_id
+    #         current_id = self.conversation_id_cache or conversation_id or "unknown"
+
+    #         if human_input:
+    #             self.turns.append({"speaker": "user", "text": human_input, "ts": int(time.time()*1000)})
+    #             if len(self.turns) % 2 == 0:
+    #                 asyncio.create_task(self._extract_slots_with_llm(current_id))
+    #             self._persist_state(current_id)
+
+    #         def personalize_response(self, text: str) -> str:
+    #             # Get name from LEAD_CONTEXT_STORE first, then fallback to extracted user_name
+    #             lead = LEAD_CONTEXT_STORE.get(self.conversation_id_cache, {})
+    #             name = lead.get("name", self.user_name or "there")
+    #             # Replace both {name} and {{name}} for compatibility with n8n
+    #             text = text.replace("{name}", name).replace("{{name}}", name)
+    #             return text
+            
+    #         # Use initial_message from agent_config for the first response
+    #         if self.conversation_state == "initial" and not human_input and hasattr(self.agent_config, 'initial_message') and self.agent_config.initial_message:
+    #             response = personalize_response(self, self.agent_config.initial_message.text)
+    #             self.conversation_state = "greeting_sent"
+    #             self.last_response_time = start_time
+    #             self.turns.append({"speaker": "bot", "text": response, "ts": int(time.time()*1000)})
+    #             self._persist_state(current_id)
+    #             return response, False
+
+    #         if time.time() - self.last_response_time > 15:
+    #             self.no_input_count += 1
+    #             logger.warning(f"No transcription for 15s (attempt {self.no_input_count})")
+    #             if self.no_input_count >= 3:
+    #                 bot_text = personalize_response("Trouble connecting. I’ll follow up later. Thank you!")
+    #                 self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+    #                 self._persist_state(current_id)
+    #                 await self.end_call(conversation_id)  # New: End the call
+    #                 return bot_text, True
+    #             bot_text = personalize_response("I didn’t catch that. Available to discuss chess coaching?")
+    #             self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+    #             self._persist_state(current_id)
+    #             return bot_text, False
+
+    #         normalized = (human_input or "").strip().lower()
+    #         filler_phrases = {"", "mhmm", "okay", "what", "yes", "no", "a-", "four", "hello", "hi"}
+    #         if normalized in filler_phrases:
+    #             self.no_input_count += 1
+    #             logger.debug(f"Filler input (count {self.no_input_count}): '{human_input}'")
+    #             if self.no_input_count >= 3:
+    #                 bot_text = personalize_response("No valid input. I’ll follow up later. Thank you!")
+    #                 self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+    #                 self._persist_state(current_id)
+    #                 return bot_text, True
+    #             self.last_response_time = start_time
+    #             bot_text = personalize_response("Didn’t catch that. Confirm availability?")
+    #             self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+    #             self._persist_state(current_id)
+    #             return bot_text, False
+
+    #         gibberish_indicators = ["what is the first time", "first time", "please repeat", "say again"]
+    #         if any(phrase in normalized for phrase in gibberish_indicators):
+    #             self.no_input_count += 1
+    #             logger.debug(f"Gibberish input (count {self.no_input_count}): '{human_input}'")
+    #             if self.no_input_count >= 3:
+    #                 bot_text = personalize_response("Trouble connecting. I’ll follow up later. Thank you!")
+    #                 self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+    #                 self._persist_state(current_id)
+    #                 return bot_text, True
+    #             self.last_response_time = start_time
+    #             bot_text = personalize_response("Sorry, repeat or say yes/no if available?")
+    #             self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+    #             self._persist_state(current_id)
+    #             return bot_text, False
+
+    #         self.no_input_count = 0
+
+    #         if self.asked_for_name and "name is" in normalized:
+    #             try:
+    #                 name_part = human_input.lower().split("name is", 1)[1].strip().split()
+    #                 self.user_name = name_part[0].capitalize()
+    #                 logger.debug(f"Extracted user name: {self.user_name}")
+    #             except Exception:
+    #                 self.user_name = None
+
+    #         slots = self.extracted_slots
+    #         intent = slots.get("intent")
+
+    #         # FAQ handling
+    #         if any(q in normalized for q in ["price", "pricing", "cost", "timings", "time", "services"]):
+    #             if "price" in normalized or "cost" in normalized:
+    #                 response = "Our fees start at ₹500/hour, varying by experience. Want more details?"
+    #             elif "timings" in normalized or "time" in normalized:
+    #                 response = "Coaching is 3-6 PM school hours. Flexible options available—discuss?"
+    #             elif "services" in normalized:
+    #                 response = "We offer curricula, training, and school placements. More questions?"
+    #             self.last_response_time = start_time
+    #             self.turns.append({"speaker": "bot", "text": response, "ts": int(time.time()*1000)})
+    #             self._persist_state(current_id)
+    #             return response, False
+
+    #         # NEW: Real-time sentiment-based routing
+    #         sentiment = await sentiment_chain.ainvoke({"transcript": "\n".join(t["text"] for t in self.turns)})
+    #         if sentiment["sentiment"] == "angry" or "upset" in normalized:
+    #             logger.info("Detected angry tone, routing to calm rep")
+    #             bot_text = "I’ll connect you with a calm rep to assist you."
+    #             self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+    #             self._persist_state(current_id)
+    #             return bot_text, True
+
+    #         if self.conversation_state == "initial":
+    #             if any(word in normalized for word in ["yes", "sure", "okay", "available"]):
+    #                 self.conversation_state = "background"
+    #                 response = "Great! Due to your interest, confirm your Bangalore location?"
+    #             else:
+    #                 response = personalize_response("Sorry, misheard. Available to discuss coaching?")
+    #             self.last_response_time = start_time
+    #             self.turns.append({"speaker": "bot", "text": response, "ts": int(time.time()*1000)})
+    #             self._persist_state(current_id)
+    #             return response, False
+    #         else:
+    #             try:
+    #                 response, should_end = await asyncio.wait_for(
+    #                     super().respond(human_input, conversation_id, is_interrupt), timeout=5.0
+    #                 )
+    #             except asyncio.TimeoutError:
+    #                 fallback_msg = personalize_response("Response delayed. Try again shortly.")
+    #                 self.turns.append({"speaker": "bot", "text": fallback_msg, "ts": int(time.time()*1000)})
+    #                 self._persist_state(current_id)
+    #                 await self.end_call(conversation_id)  # New: End call on timeout
+    #                 return fallback_msg, True
+
+    #             if response:
+    #                 response_text = personalize_response(response)
+    #                 if "location" in response_text.lower():
+    #                     self.conversation_state = "background"
+    #                 if any(phrase in response_text.lower() for phrase in ["confirm your full name", "may i have your name"]):
+    #                     self.asked_for_name = True
+
+    #                 if intent == "interested" and "schedule" in response_text.lower():
+    #                     available_slots = await check_calendar_availability(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+    #                     if available_slots["available"]:
+    #                         bot_text = f"Great! Available slots: {', '.join(available_slots['slots'])}. Provide name, email, and preferred time?"
+    #                         self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+    #                         self._persist_state(current_id)
+    #                         return bot_text, False
+    #                     else:
+    #                         bot_text = "No slots available now. I’ll follow up. Thank you!"
+    #                         self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+    #                         self._persist_state(current_id)
+    #                         await self.end_call(conversation_id)  # New: End the call
+    #                         return bot_text, True
+
+    #                 if intent == "support":
+    #                     bot_text = "Let me route you to our support team."
+    #                     self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+    #                     self._persist_state(current_id)
+    #                     return bot_text, True
+    #                 elif intent == "interested":
+    #                     bot_text = "Impressive! Connecting you to a sales rep."
+    #                     self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
+    #                     self._persist_state(current_id)
+    #                     await self.end_call(conversation_id)  # New: End call after routing
+    #                     return bot_text, True
+
+    #                 self.last_response_time = start_time
+    #                 self.turns.append({"speaker": "bot", "text": response_text, "ts": int(time.time()*1000)})
+    #                 if len(self.turns) % 4 == 0:
+    #                     asyncio.create_task(self._extract_slots_with_llm(current_id))
+    #                 self._persist_state(current_id)
+    #                 return response_text, should_end
+
+    #             fallback_msg = personalize_response("Didn’t get that. Tell me more?")
+    #             self.last_response_time = start_time
+    #             self.turns.append({"speaker": "bot", "text": fallback_msg, "ts": int(time.time()*1000)})
+    #             self._persist_state(current_id)
+    #             return fallback_msg, False
+
+    #     except Exception as e:
+    #         logger.error(f"Error generating response: {str(e)}")
+    #         fallback_error_msg = "Error occurred. Try again."
+    #         self.turns.append({"speaker": "bot", "text": fallback_error_msg, "ts": int(time.time()*1000)})
+    #         current_id = self.conversation_id_cache or conversation_id or "unknown"
+    #         self._persist_state(current_id)
+    #         return fallback_error_msg, False
+
+
+
+
     async def respond(self, human_input: str, conversation_id: str, is_interrupt: bool = False) -> Tuple[Optional[str], bool]:
         try:
             start_time = time.time()
@@ -12956,10 +13146,8 @@ class CustomLangchainAgent(LangchainAgent):
                 self._persist_state(current_id)
 
             def personalize_response(self, text: str) -> str:
-                # Get name from LEAD_CONTEXT_STORE first, then fallback to extracted user_name
                 lead = LEAD_CONTEXT_STORE.get(self.conversation_id_cache, {})
                 name = lead.get("name", self.user_name or "there")
-                # Replace both {name} and {{name}} for compatibility with n8n
                 text = text.replace("{name}", name).replace("{{name}}", name)
                 return text
 
@@ -12970,7 +13158,7 @@ class CustomLangchainAgent(LangchainAgent):
                     bot_text = personalize_response("Trouble connecting. I’ll follow up later. Thank you!")
                     self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
                     self._persist_state(current_id)
-                    await self.end_call(conversation_id)  # New: End the call
+                    await self.end_call(conversation_id)
                     return bot_text, True
                 bot_text = personalize_response("I didn’t catch that. Available to discuss chess coaching?")
                 self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
@@ -13021,7 +13209,6 @@ class CustomLangchainAgent(LangchainAgent):
             slots = self.extracted_slots
             intent = slots.get("intent")
 
-            # FAQ handling
             if any(q in normalized for q in ["price", "pricing", "cost", "timings", "time", "services"]):
                 if "price" in normalized or "cost" in normalized:
                     response = "Our fees start at ₹500/hour, varying by experience. Want more details?"
@@ -13034,7 +13221,6 @@ class CustomLangchainAgent(LangchainAgent):
                 self._persist_state(current_id)
                 return response, False
 
-            # NEW: Real-time sentiment-based routing
             sentiment = await sentiment_chain.ainvoke({"transcript": "\n".join(t["text"] for t in self.turns)})
             if sentiment["sentiment"] == "angry" or "upset" in normalized:
                 logger.info("Detected angry tone, routing to calm rep")
@@ -13062,7 +13248,7 @@ class CustomLangchainAgent(LangchainAgent):
                     fallback_msg = personalize_response("Response delayed. Try again shortly.")
                     self.turns.append({"speaker": "bot", "text": fallback_msg, "ts": int(time.time()*1000)})
                     self._persist_state(current_id)
-                    await self.end_call(conversation_id)  # New: End call on timeout
+                    await self.end_call(conversation_id)
                     return fallback_msg, True
 
                 if response:
@@ -13083,7 +13269,7 @@ class CustomLangchainAgent(LangchainAgent):
                             bot_text = "No slots available now. I’ll follow up. Thank you!"
                             self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
                             self._persist_state(current_id)
-                            await self.end_call(conversation_id)  # New: End the call
+                            await self.end_call(conversation_id)
                             return bot_text, True
 
                     if intent == "support":
@@ -13095,7 +13281,7 @@ class CustomLangchainAgent(LangchainAgent):
                         bot_text = "Impressive! Connecting you to a sales rep."
                         self.turns.append({"speaker": "bot", "text": bot_text, "ts": int(time.time()*1000)})
                         self._persist_state(current_id)
-                        await self.end_call(conversation_id)  # New: End call after routing
+                        await self.end_call(conversation_id)
                         return bot_text, True
 
                     self.last_response_time = start_time
@@ -13376,24 +13562,30 @@ async def outbound_call(req: OutboundCallRequest):
         if not to_phone or len(to_phone) < 10:
             raise HTTPException(status_code=400, detail="Invalid phone")
 
+        # Initialize agent_config with defaults
+        agent_config = LangchainAgentConfig(
+            model_name="llama-3.1-8b-instant",
+            api_key=os.getenv("GROQ_API_KEY", ""),
+            provider="groq",
+        )
+
+        # Use stored config if agent_id is provided
         if req.agent_id:
-            agent_config = stored_agent_configs.get(req.agent_id)
-            if not agent_config:
+            stored_config = stored_agent_configs.get(req.agent_id)
+            if not stored_config:
                 raise HTTPException(status_code=404, detail="Agent config not found")
+            agent_config = stored_config
             logger.info(f"Using stored agent config by id {req.agent_id}")
         else:
-            # Require initial_message and prompt_preamble from request; no hardcodes
+            # Require initial_message and prompt_preamble from request
             if not req.initial_message or not req.prompt_preamble:
                 raise HTTPException(status_code=400, detail="initial_message and prompt_preamble are required if no agent_id provided")
-            print("<<<<<<<<<<<<<<<<<<<<<<<<<<<.",req.initial_message,">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-            print("<<<<<<<<<<<<<<<<<<<<<<<<<<<.",req.prompt_preamble,">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-            agent_config = LangchainAgentConfig(
-                initial_message=BaseMessage(text=req.initial_message),
-                prompt_preamble=req.prompt_preamble,
-                model_name="llama-3.1-8b-instant",
-                api_key=os.getenv("GROQ_API_KEY", ""),
-                provider="groq",
-            )
+            
+            logger.info(f"<<<<<<<<<<<<<<<<<<<<<<<<<<<. {req.initial_message} >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+            logger.info(f"<<<<<<<<<<<<<<<<<<<<<<<<<<<. {req.prompt_preamble} >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+            
+            agent_config.initial_message = BaseMessage(text=req.initial_message)
+            agent_config.prompt_preamble = req.prompt_preamble
 
         # Personalize the prompt_preamble and initial_message using lead details if provided
         lead = req.lead or {}
@@ -13405,9 +13597,13 @@ async def outbound_call(req: OutboundCallRequest):
                 "{{role}}": lead.get("role", ""),
                 "{{today}}": time.strftime("%I:%M %p IST, %A, %B %d, %Y", time.localtime())
             }
-            for placeholder, value in replacements.items():
-                agent_config.prompt_preamble = agent_config.prompt_preamble.replace(placeholder, value)
-                agent_config.initial_message.text = agent_config.initial_message.text.replace(placeholder, value)
+            # Ensure personalization does not overwrite with empty values
+            if agent_config.prompt_preamble:
+                for placeholder, value in replacements.items():
+                    agent_config.prompt_preamble = agent_config.prompt_preamble.replace(placeholder, value)
+            if agent_config.initial_message:
+                for placeholder, value in replacements.items():
+                    agent_config.initial_message.text = agent_config.initial_message.text.replace(placeholder, value)
 
             logger.info(f"Personalized agent config with lead: {lead}")
 

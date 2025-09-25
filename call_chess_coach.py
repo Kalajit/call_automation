@@ -13385,6 +13385,8 @@ async def outbound_call(req: OutboundCallRequest):
             # Require initial_message and prompt_preamble from request; no hardcodes
             if not req.initial_message or not req.prompt_preamble:
                 raise HTTPException(status_code=400, detail="initial_message and prompt_preamble are required if no agent_id provided")
+            print("<<<<<<<<<<<<<<<<<<<<<<<<<<<.",req.initial_message,">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+            print("<<<<<<<<<<<<<<<<<<<<<<<<<<<.",req.prompt_preamble,">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
             agent_config = LangchainAgentConfig(
                 initial_message=BaseMessage(text=req.initial_message),
                 prompt_preamble=req.prompt_preamble,

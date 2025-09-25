@@ -13333,7 +13333,7 @@ class AgentConfigInput(BaseModel):
 
 
 @app.post("/set_agent_config")
-async def set_agent_config(agent_config_input: AgentConfigInput):
+async def set_agent_config(agent_data: AgentConfigInput):
     agent_id = f"agent_{int(time.time()*1000)}"  # create unique agent_id
     agent_config = LangchainAgentConfig(
         initial_message=BaseMessage(text=agent_data.initial_message),

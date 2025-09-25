@@ -12406,6 +12406,12 @@ from pydub import AudioSegment  # NEW: For audio conversion (MP3/WAV)
 import wave  # NEW: For WAV file handling
 import io
 
+import redis
+from redis.asyncio import Redis as AsyncRedis
+
+
+
+
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -12447,10 +12453,12 @@ CALENDAR_API_URL = os.getenv("CALENDAR_API_URL", "https://your-calendar-api.com/
 # NEW: WhatsApp sender number (for summaries)
 WHATSAPP_SENDER = os.getenv("WHATSAPP_SENDER", TWILIO_PHONE_NUMBER)
 
+REDIS_URL = os.getenv("REDIS_URL", "redis://red-d3ajjci4d50c73dc0gg0:6379")
+
 
 
 # Validate environment variables
-required_vars = [GROQ_API_KEY, DEEPGRAM_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, BASE_URL, CRM_API_URL, CRM_API_KEY, EMAIL_SMTP_SERVER, EMAIL_SENDER, EMAIL_PASSWORD, CALENDAR_API_URL]
+required_vars = [GROQ_API_KEY, DEEPGRAM_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, BASE_URL, CRM_API_URL, CRM_API_KEY, EMAIL_SMTP_SERVER, EMAIL_SENDER, EMAIL_PASSWORD, CALENDAR_API_URL, REDIS_URL]
 if not all(required_vars):
     raise ValueError("Missing required environment variables in .env file. Required: GROQ_API_KEY, DEEPGRAM_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, BASE_URL")
 
@@ -12580,6 +12588,10 @@ if not BASE_URL.endswith((".ngrok-free.app", ".ngrok.io")):
 # Groq LLM setup
 llm = ChatGroq(model_name="llama-3.1-8b-instant")
 # llm = ChatGroq(model_name="groq/compound-mini")
+
+# NEW: Redis client setup
+r = redis.from_url(REDIS_URL)
+ar = AsyncRedis.from_url(REDIS_URL)
 
 # Config Manager
 config_manager = InMemoryConfigManager()
@@ -13240,27 +13252,27 @@ class CustomLangchainAgent(LangchainAgent):
                 self._persist_state(current_id)
                 return bot_text, True
 
-            # if self.conversation_state == "initial":
-            #     if any(word in normalized for word in ["yes", "sure", "okay", "available"]):
-            #         self.conversation_state = "background"
-            #         response = "Great! Due to your interest, confirm your Bangalore location?"
-            #     else:
-            #         response = personalize_response("Sorry, misheard. Available to discuss coaching?")
-            #     self.last_response_time = start_time
-            #     self.turns.append({"speaker": "bot", "text": response, "ts": int(time.time()*1000)})
-            #     self._persist_state(current_id)
-            #     return response, False
-            # else:
-            #     try:
-            #         response, should_end = await asyncio.wait_for(
-            #             super().respond(human_input, conversation_id, is_interrupt), timeout=5.0
-            #         )
-            #     except asyncio.TimeoutError:
-            #         fallback_msg = personalize_response("Response delayed. Try again shortly.")
-            #         self.turns.append({"speaker": "bot", "text": fallback_msg, "ts": int(time.time()*1000)})
-            #         self._persist_state(current_id)
-            #         await self.end_call(conversation_id)
-            #         return fallback_msg, True
+            if self.conversation_state == "initial":
+                if any(word in normalized for word in ["yes", "sure", "okay", "available"]):
+                    self.conversation_state = "background"
+                    response = "Great! Due to your interest, confirm your Bangalore location?"
+                else:
+                    response = personalize_response("Sorry, misheard. Available to discuss coaching?")
+                self.last_response_time = start_time
+                self.turns.append({"speaker": "bot", "text": response, "ts": int(time.time()*1000)})
+                self._persist_state(current_id)
+                return response, False
+            else:
+                try:
+                    response, should_end = await asyncio.wait_for(
+                        super().respond(human_input, conversation_id, is_interrupt), timeout=5.0
+                    )
+                except asyncio.TimeoutError:
+                    fallback_msg = personalize_response("Response delayed. Try again shortly.")
+                    self.turns.append({"speaker": "bot", "text": fallback_msg, "ts": int(time.time()*1000)})
+                    self._persist_state(current_id)
+                    await self.end_call(conversation_id)
+                    return fallback_msg, True
 
                 if response:
                     response_text = personalize_response(response)
@@ -13539,8 +13551,9 @@ async def set_agent_config(agent_data: AgentConfigInput):
         api_key=os.getenv("GROQ_API_KEY", ""),
         provider="groq",
     )
-    stored_agent_configs[agent_id] = agent_config
-    logger.info(f"Stored agent config for agent_id {agent_id} with prompt_preamble: {agent_config.prompt_preamble[:120]} and initial_message: {agent_config.initial_message.text[:120]}")
+    # Store in Redis instead of in-memory dict
+    r.set(agent_id, agent_config.model_dump_json(), ex=3600)  # Expire in 1 hour
+    logger.info(f"Stored agent config in Redis for agent_id {agent_id} with prompt_preamble: {agent_config.prompt_preamble[:120]} and initial_message: {agent_config.initial_message.text[:120]}")
     return {"agent_id": agent_id}
 
 class OutboundCallRequest(BaseModel):
@@ -13586,16 +13599,17 @@ async def outbound_call(req: OutboundCallRequest):
 
         # Use stored config if agent_id is provided
         if req.agent_id:
-            stored_config = stored_agent_configs.get(req.agent_id)
-            if not stored_config:
-                raise HTTPException(status_code=404, detail="Agent config not found")
-            # Validate stored config
+            config_json = r.get(req.agent_id)
+            if not config_json:
+                raise HTTPException(status_code=404, detail="Agent config not found in Redis")
+            config_dict = json.loads(config_json)
+            stored_config = CustomLangchainAgentConfig(**config_dict)
             if not hasattr(stored_config, 'prompt_preamble') or not stored_config.prompt_preamble:
                 raise HTTPException(status_code=400, detail=f"Stored config for agent_id {req.agent_id} lacks prompt_preamble")
             if not hasattr(stored_config, 'initial_message') or not stored_config.initial_message:
                 raise HTTPException(status_code=400, detail=f"Stored config for agent_id {req.agent_id} lacks initial_message")
             agent_config = stored_config
-            logger.info(f"Using stored agent config by id {req.agent_id}")
+            logger.info(f"Using stored agent config from Redis by id {req.agent_id}")
         else:
             if not req.initial_message or not req.prompt_preamble:
                 raise HTTPException(status_code=400, detail="initial_message and prompt_preamble are required if no agent_id provided")
@@ -13767,6 +13781,17 @@ def outbound_scheduler():
 @app.get("/")
 async def root():
     return {"message": "API is running. Use /outbound_call to trigger calls."}
+
+
+
+@app.get("/test_redis")
+async def test_redis():
+    try:
+        r.set("test_key", "test_value")
+        value = r.get("test_key")
+        return {"status": "success", "value": value.decode() if value else None}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Main entrypoint (updated to include scheduler)
 if __name__ == "__main__":

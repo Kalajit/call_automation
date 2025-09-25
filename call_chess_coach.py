@@ -12768,12 +12768,11 @@ async def save_recording(conversation_id: str) -> str:
 
 # Custom Agent Config
 class CustomLangchainAgentConfig(LangchainAgentConfig, type="agent_langchain"):
-    # initial_message: BaseMessage = BaseMessage(text="Hello, this is Priya from 4champz, a leading chess coaching service in Bengaluru. Do you have 5-10 minutes to discuss some exciting chess coaching opportunities with schools in Bangalore?")
-    # prompt_preamble: str = CHESS_COACH_PROMPT_PREAMBLE
     model_name: str = "llama-3.1-8b-instant"
-    # model_name: str = "groq/compound-mini"
     api_key: str = GROQ_API_KEY
     provider: str = "groq"
+    prompt_preamble: Optional[str] = Field(default=None, description="Prompt preamble for the agent")
+    initial_message: Optional[BaseMessage] = Field(default=None, description="Initial message for the conversation")
 
 # Custom Langchain Agent
 class CustomLangchainAgent(LangchainAgent):
@@ -13150,6 +13149,18 @@ class CustomLangchainAgent(LangchainAgent):
                 name = lead.get("name", self.user_name or "there")
                 text = text.replace("{name}", name).replace("{{name}}", name)
                 return text
+            
+
+            # Use initial_message from agent_config for the first response
+            if self.conversation_state == "initial" and not human_input:
+                if not hasattr(self.agent_config, 'initial_message') or not self.agent_config.initial_message:
+                    raise ValueError("initial_message is required in agent_config")
+                response = personalize_response(self, self.agent_config.initial_message.text)
+                self.conversation_state = "greeting_sent"
+                self.last_response_time = start_time
+                self.turns.append({"speaker": "bot", "text": response, "ts": int(time.time()*1000)})
+                self._persist_state(current_id)
+                return response, False
 
             if time.time() - self.last_response_time > 15:
                 self.no_input_count += 1
@@ -13229,27 +13240,27 @@ class CustomLangchainAgent(LangchainAgent):
                 self._persist_state(current_id)
                 return bot_text, True
 
-            if self.conversation_state == "initial":
-                if any(word in normalized for word in ["yes", "sure", "okay", "available"]):
-                    self.conversation_state = "background"
-                    response = "Great! Due to your interest, confirm your Bangalore location?"
-                else:
-                    response = personalize_response("Sorry, misheard. Available to discuss coaching?")
-                self.last_response_time = start_time
-                self.turns.append({"speaker": "bot", "text": response, "ts": int(time.time()*1000)})
-                self._persist_state(current_id)
-                return response, False
-            else:
-                try:
-                    response, should_end = await asyncio.wait_for(
-                        super().respond(human_input, conversation_id, is_interrupt), timeout=5.0
-                    )
-                except asyncio.TimeoutError:
-                    fallback_msg = personalize_response("Response delayed. Try again shortly.")
-                    self.turns.append({"speaker": "bot", "text": fallback_msg, "ts": int(time.time()*1000)})
-                    self._persist_state(current_id)
-                    await self.end_call(conversation_id)
-                    return fallback_msg, True
+            # if self.conversation_state == "initial":
+            #     if any(word in normalized for word in ["yes", "sure", "okay", "available"]):
+            #         self.conversation_state = "background"
+            #         response = "Great! Due to your interest, confirm your Bangalore location?"
+            #     else:
+            #         response = personalize_response("Sorry, misheard. Available to discuss coaching?")
+            #     self.last_response_time = start_time
+            #     self.turns.append({"speaker": "bot", "text": response, "ts": int(time.time()*1000)})
+            #     self._persist_state(current_id)
+            #     return response, False
+            # else:
+            #     try:
+            #         response, should_end = await asyncio.wait_for(
+            #             super().respond(human_input, conversation_id, is_interrupt), timeout=5.0
+            #         )
+            #     except asyncio.TimeoutError:
+            #         fallback_msg = personalize_response("Response delayed. Try again shortly.")
+            #         self.turns.append({"speaker": "bot", "text": fallback_msg, "ts": int(time.time()*1000)})
+            #         self._persist_state(current_id)
+            #         await self.end_call(conversation_id)
+            #         return fallback_msg, True
 
                 if response:
                     response_text = personalize_response(response)
@@ -13515,8 +13526,13 @@ class AgentConfigInput(BaseModel):
 
 @app.post("/set_agent_config")
 async def set_agent_config(agent_data: AgentConfigInput):
-    agent_id = f"agent_{int(time.time()*1000)}"  # create unique agent_id
-    agent_config = LangchainAgentConfig(
+    allowed_types = ["medical_sales", "hospital_receptionist", "chess_coach"]
+    if agent_data.agent_type not in allowed_types:
+        raise HTTPException(status_code=400, detail=f"Invalid agent_type. Must be one of {allowed_types}")
+    if not agent_data.initial_message or not agent_data.prompt_preamble:
+        raise HTTPException(status_code=400, detail="initial_message and prompt_preamble are required")
+    agent_id = f"agent_{int(time.time()*1000)}"
+    agent_config = CustomLangchainAgentConfig(
         initial_message=BaseMessage(text=agent_data.initial_message),
         prompt_preamble=agent_data.prompt_preamble,
         model_name="llama-3.1-8b-instant",
@@ -13524,9 +13540,8 @@ async def set_agent_config(agent_data: AgentConfigInput):
         provider="groq",
     )
     stored_agent_configs[agent_id] = agent_config
-    # logger.info(f"Stored new agent config under ID {agent_id} for type {agent_config_input.agent_type}")
+    logger.info(f"Stored agent config for agent_id {agent_id} with prompt_preamble: {agent_config.prompt_preamble[:120]} and initial_message: {agent_config.initial_message.text[:120]}")
     return {"agent_id": agent_id}
-
 
 class OutboundCallRequest(BaseModel):
     to_phone: str
@@ -13563,7 +13578,7 @@ async def outbound_call(req: OutboundCallRequest):
             raise HTTPException(status_code=400, detail="Invalid phone")
 
         # Initialize agent_config with defaults
-        agent_config = LangchainAgentConfig(
+        agent_config = CustomLangchainAgentConfig(
             model_name="llama-3.1-8b-instant",
             api_key=os.getenv("GROQ_API_KEY", ""),
             provider="groq",
@@ -13574,10 +13589,14 @@ async def outbound_call(req: OutboundCallRequest):
             stored_config = stored_agent_configs.get(req.agent_id)
             if not stored_config:
                 raise HTTPException(status_code=404, detail="Agent config not found")
+            # Validate stored config
+            if not hasattr(stored_config, 'prompt_preamble') or not stored_config.prompt_preamble:
+                raise HTTPException(status_code=400, detail=f"Stored config for agent_id {req.agent_id} lacks prompt_preamble")
+            if not hasattr(stored_config, 'initial_message') or not stored_config.initial_message:
+                raise HTTPException(status_code=400, detail=f"Stored config for agent_id {req.agent_id} lacks initial_message")
             agent_config = stored_config
             logger.info(f"Using stored agent config by id {req.agent_id}")
         else:
-            # Require initial_message and prompt_preamble from request
             if not req.initial_message or not req.prompt_preamble:
                 raise HTTPException(status_code=400, detail="initial_message and prompt_preamble are required if no agent_id provided")
             
@@ -13586,6 +13605,16 @@ async def outbound_call(req: OutboundCallRequest):
             
             agent_config.initial_message = BaseMessage(text=req.initial_message)
             agent_config.prompt_preamble = req.prompt_preamble
+
+
+
+            # Override with provided initial_message and prompt_preamble if present
+        if req.initial_message:
+            agent_config.initial_message = BaseMessage(text=req.initial_message)
+            logger.info(f"Overriding initial_message with provided value: {req.initial_message[:120]}")
+        if req.prompt_preamble:
+            agent_config.prompt_preamble = req.prompt_preamble
+            logger.info(f"Overriding prompt_preamble with provided value: {req.prompt_preamble[:120]}")
 
         # Personalize the prompt_preamble and initial_message using lead details if provided
         lead = req.lead or {}
@@ -13640,8 +13669,10 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
     twilio_phone = TWILIO_PHONE_NUMBER
     twilio_base_url = f"https://{BASE_URL}"
     
-    # Default fallback message
-    initial_message = agent_config.initial_message.text if agent_config.initial_message else "Hello, this is a default message."
+    # Use provided initial_message or raise error if missing
+    if not agent_config.initial_message:
+        raise ValueError("initial_message is required in agent_config")
+    initial_message = agent_config.initial_message.text
 
     # Generate unique call_sid if needed
     call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"

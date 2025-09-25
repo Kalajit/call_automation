@@ -12955,11 +12955,13 @@ class CustomLangchainAgent(LangchainAgent):
                     asyncio.create_task(self._extract_slots_with_llm(current_id))
                 self._persist_state(current_id)
 
-            def personalize_response(text: str) -> str:
-                if self.user_name:
-                    return text.replace("{name}", self.user_name)
-                external_name = "there"
-                return text.replace("{name}", external_name)
+            def personalize_response(self, text: str) -> str:
+                # Get name from LEAD_CONTEXT_STORE first, then fallback to extracted user_name
+                lead = LEAD_CONTEXT_STORE.get(self.conversation_id_cache, {})
+                name = lead.get("name", self.user_name or "there")
+                # Replace both {name} and {{name}} for compatibility with n8n
+                text = text.replace("{name}", name).replace("{{name}}", name)
+                return text
 
             if time.time() - self.last_response_time > 15:
                 self.no_input_count += 1
@@ -13346,7 +13348,9 @@ class OutboundCallRequest(BaseModel):
     transcript_callback_url: Optional[str] = None
     call_type: str = "qualification"
     agent_type: Optional[str] = None
-    agent_id: Optional[str] = None  # Accept a stored agent id here
+    agent_id: Optional[str] = None
+    initial_message: Optional[str] = None  # Added to accept directly from n8n
+    prompt_preamble: Optional[str] = None  # Added to accept directly from n8n
 
 
 
@@ -13378,14 +13382,32 @@ async def outbound_call(req: OutboundCallRequest):
                 raise HTTPException(status_code=404, detail="Agent config not found")
             logger.info(f"Using stored agent config by id {req.agent_id}")
         else:
-            # fallback to build agent dynamically if no agent_id provided
+            # Use initial_message and prompt_preamble from request if provided
+            initial_message = req.initial_message or "Hello, this is Priya from 4champz, a leading chess coaching service in Bengaluru. Do you have 5-10 minutes to discuss some exciting chess coaching opportunities with schools in Bangalore?"
+            prompt_preamble = req.prompt_preamble or CHESS_COACH_PROMPT_PREAMBLE
             agent_config = LangchainAgentConfig(
-                initial_message=BaseMessage(text=req.agent_type or "Hello, this is a default message."),
-                prompt_preamble="",
+                initial_message=BaseMessage(text=initial_message),
+                prompt_preamble=prompt_preamble,
                 model_name="llama-3.1-8b-instant",
                 api_key=os.getenv("GROQ_API_KEY", ""),
                 provider="groq",
             )
+
+        # Personalize the prompt_preamble and initial_message using lead details if provided
+        lead = req.lead or {}
+        if lead:
+            replacements = {
+                "{{name}}": lead.get("name", "there"),
+                "{{email}}": lead.get("email", ""),
+                "{{phone_number}}": lead.get("phone_number", to_phone),
+                "{{role}}": lead.get("role", ""),
+                "{{today}}": time.strftime("%I:%M %p IST, %A, %B %d, %Y", time.localtime())
+            }
+            for placeholder, value in replacements.items():
+                agent_config.prompt_preamble = agent_config.prompt_preamble.replace(placeholder, value)
+                agent_config.initial_message.text = agent_config.initial_message.text.replace(placeholder, value)
+
+            logger.info(f"Personalized agent config with lead: {lead}")
 
         call_key = f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
 
@@ -13395,9 +13417,8 @@ async def outbound_call(req: OutboundCallRequest):
 
         logger.info(f"Saved agent under call_key {call_key}")
 
-        sid = await make_outbound_call(to_phone, req.call_type, req.lead, req.agent_type, agent_config, call_sid=call_key)
+        sid = await make_outbound_call(to_phone, req.call_type, lead, req.agent_type, agent_config, call_sid=call_key)
 
-        lead = req.lead or {}
         lead["to_phone"] = to_phone
         LEAD_CONTEXT_STORE[sid] = lead
         logger.info(f"Outbound call requested via n8n: SID={sid}, lead={lead}")
@@ -13411,6 +13432,9 @@ async def outbound_call(req: OutboundCallRequest):
     except Exception as e:
         logger.error(f"/outbound_call failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+
 
 # Outbound call helper
 async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_type: str, agent_config: AgentConfig, call_sid: str = None):

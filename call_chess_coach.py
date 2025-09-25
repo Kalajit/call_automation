@@ -12384,7 +12384,7 @@ import json  # ADDED for JSON capture with LLM extraction
 import re    # ADDED: general regex utilities
 from pathlib import Path  # ADDED: filesystem-safe paths
 from fastapi import HTTPException  # ADDED n8n
-from pydantic import BaseModel  # ADDED n8n
+from pydantic import BaseModel, Field # ADDED n8n
 
 # NEW: For sentiment analysis and summaries (using Groq LLM)
 from langchain.prompts import PromptTemplate

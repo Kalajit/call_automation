@@ -13301,7 +13301,7 @@ app.include_router(telephony_server.get_router())
 # NEW: Endpoint to handle Twilio call status callbacks for inbound calls
 @app.post("/call_status")
 async def call_status(request: Request):
-    data = await request.json()
+    data = await request.form()  # Changed to form() for Twilio data
     call_sid = data.get("CallSid")
     if data.get("CallStatus") == "completed":
         logger.info(f"Inbound call {call_sid} completed")
@@ -13496,7 +13496,8 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
 
 @app.post("/inbound_call")
 async def inbound_call(request: Request):
-    call_sid = request.query_params.get("call_sid")
+    data = await request.form()  # Changed to form() for Twilio POST data
+    call_sid = data.get("CallSid")  # Use Twilio's CallSid
     agent_config = await config_manager.get_config(call_sid)
     if agent_config is None:
         logger.warning(f"No agent config found for call_sid: {call_sid}, using default message.")

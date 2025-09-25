@@ -12586,15 +12586,15 @@ config_manager = InMemoryConfigManager()
 
 stored_agent_configs: Dict[str, LangchainAgentConfig] = {}
 
-# ADDED for JSON capture with LLM extraction: global in-memory store
-CONVERSATION_STORE: dict = {}  # ADDED for JSON LLM extraction
+
+
 
 # ADDED for JSON capture with LLM extraction: directory for local persistence
 CONVERSATIONS_DIR = Path("conversations")  # ADDED
 CONVERSATIONS_DIR.mkdir(exist_ok=True, parents=True)  # ADDED
 
-# ADDED n8n: store lead context by call_sid/conversation_id
-LEAD_CONTEXT_STORE: dict = {}  # ADDED n8n
+LEAD_CONTEXT_STORE = {}
+CONVERSATION_STORE = {}
 
 
 # Sentiment Analysis Chain (using Groq LLM)
@@ -13257,33 +13257,47 @@ agent_config = LangchainAgentConfig(
 
 
 # Telephony Server setup
+# telephony_server = TelephonyServer(
+#     base_url=BASE_URL,  # your ngrok url
+#     config_manager=config_manager,
+#     inbound_call_configs=[
+#         TwilioInboundCallConfig(
+#             url="/inbound_call",
+#             twilio_config=twilio_config,
+#             config_manager=config_manager,
+#             agent_config=agent_config,
+#             synthesizer_config=synthesizer_config,
+#             transcriber_config=transcriber_config,  # Use instance
+#             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
+# <Response>
+#     <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
+#     <Pause length="15"/>
+#     <Redirect method="POST">/inbound_call</Redirect>
+# </Response>''',
+#             record=True,
+#             status_callback=f"https://{BASE_URL}/call_status",  # NEW: Added for inbound call status
+#             status_callback_method="POST",
+#             status_callback_event=["completed"]  # Trigger on call completion
+#         )
+#     ],
+#     agent_factory=CustomAgentFactory(),
+#     synthesizer_factory=CustomSynthesizerFactory(),
+#     events_manager=ChessEventsManager(),
+# )
+
+
 telephony_server = TelephonyServer(
-    base_url=BASE_URL,  # your ngrok url
-    config_manager=config_manager,
-    inbound_call_configs=[
-        TwilioInboundCallConfig(
-            url="/inbound_call",
-            twilio_config=twilio_config,
-            config_manager=config_manager,
-            agent_config=agent_config,
-            synthesizer_config=synthesizer_config,
-            transcriber_config=transcriber_config,  # Use instance
-            twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
-    <Pause length="15"/>
-    <Redirect method="POST">/inbound_call</Redirect>
-</Response>''',
-            record=True,
-            status_callback=f"https://{BASE_URL}/call_status",  # NEW: Added for inbound call status
-            status_callback_method="POST",
-            status_callback_event=["completed"]  # Trigger on call completion
-        )
-    ],
-    agent_factory=CustomAgentFactory(),
-    synthesizer_factory=CustomSynthesizerFactory(),
-    events_manager=ChessEventsManager(),
+    base_url=BASE_URL,  # e.g., your ngrok or public URL
+    config_manager=config_manager,  # Your existing config manager for loading/saving
+    agent_factory=CustomAgentFactory(),  # Handles Langchain agents dynamically
+    synthesizer_factory=CustomSynthesizerFactory(),  # Or Azure/whatever you use
+    events_manager=ChessEventsManager()  # Or your ChessEventsManager if custom
 )
+
+
+
+
+
 
 # Add routes to FastAPI app
 app.include_router(telephony_server.get_router())
@@ -13322,8 +13336,8 @@ class AgentConfigInput(BaseModel):
 async def set_agent_config(agent_config_input: AgentConfigInput):
     agent_id = f"agent_{int(time.time()*1000)}"  # create unique agent_id
     agent_config = LangchainAgentConfig(
-        initial_message=BaseMessage(text=agent_config_input.initial_message),
-        prompt_preamble=agent_config_input.prompt_preamble,
+        initial_message=BaseMessage(text=agent_data.initial_message),
+        prompt_preamble=agent_data.prompt_preamble,
         model_name="llama-3.1-8b-instant",
         api_key=os.getenv("GROQ_API_KEY", ""),
         provider="groq",
@@ -13444,10 +13458,6 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
     logger.info(f"Mirrored agent save: custom_id={call_sid} -> TwilioSID={call.sid} with init_message head: {agent_config.initial_message.text[:120]}")
 
 
-    # Store lead and conversation data in your stores (existing)
-    if call.sid not in LEAD_CONTEXT_STORE:
-        LEAD_CONTEXT_STORE[call.sid] = {"to_phone": to_phone, "call_type": call_type, **(lead or {})}
-
 
 
     if call.sid not in LEAD_CONTEXT_STORE:
@@ -13474,18 +13484,19 @@ async def inbound_call(request: Request):
     if agent_config is None:
         logger.warning(f"No agent config found for call_sid: {call_sid}, using default message.")
         initial_message = "Hello, this is the default message."
+        response_el = Element('Response')
+        say_el = Element('Say')
+        say_el.text = initial_message
+        response_el.append(say_el)
+        twiml_str = tostring(response_el)
+        return Response(content=twiml_str, media_type="application/xml")
     else:
-        initial_message = agent_config.initial_message.text
-        logger.info(f"Loaded agent config for call_sid: {call_sid} - Initial message: {initial_message[:120]}")
-    
-    # Create TwiML response dynamically with <Say>
-    response_el = Element('Response')
-    say_el = Element('Say')
-    say_el.text = initial_message
-    response_el.append(say_el)
+        logger.info(f"Loaded agent config for call_sid: {call_sid} - Initial message: {agent_config.initial_message.text[:120]}")
 
-    twiml_str = tostring(response_el)
-    return Response(content=twiml_str, media_type="application/xml")
+    return await telephony_server.create_inbound_call(
+        request=request,
+        agent_config=agent_config
+    )
 
 
 

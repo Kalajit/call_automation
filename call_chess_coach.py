@@ -12779,13 +12779,13 @@ async def save_recording(conversation_id: str) -> str:
     return ""
 
 # Custom Agent Config
-class CustomLangchainAgentConfig(LangchainAgentConfig, type="agent_langchain"):
+class CustomLangchainAgentConfig(LangchainAgentConfig):
     model_name: str = "llama-3.1-8b-instant"
     api_key: str = GROQ_API_KEY
     provider: str = "groq"
     prompt_preamble: Optional[str] = Field(default=None, description="Prompt preamble for the agent")
     initial_message: Optional[BaseMessage] = Field(default=None, description="Initial message for the conversation")
-    type: str = Field(default="agent_langchain", description="Type of the agent")
+    agent_type: str = Field(default="agent_langchain", description="Type of the agent")
 
 # Custom Langchain Agent
 class CustomLangchainAgent(LangchainAgent):
@@ -13597,7 +13597,7 @@ async def outbound_call(req: OutboundCallRequest):
             model_name="llama-3.1-8b-instant",
             api_key=GROQ_API_KEY,
             provider="groq",
-            type=req.agent_type or "agent_langchain"
+            agent_type=req.agent_type or "agent_langchain"
         )
         if req.agent_id:
             config_json = r.get(req.agent_id)
@@ -13608,14 +13608,14 @@ async def outbound_call(req: OutboundCallRequest):
                 raise HTTPException(status_code=400, detail="Stored config lacks required fields")
             agent_config.prompt_preamble = config_data.get("prompt_preamble")
             agent_config.initial_message = BaseMessage(text=config_data.get("initial_message"))
-            agent_config.type = config_data.get("agent_type", "agent_langchain")
+            agent_config.agent_type = config_data.get("agent_type", "agent_langchain")
             logger.info(f"Using stored agent config from Redis by id {req.agent_id}")
         else:
             if not req.initial_message or not req.prompt_preamble:
                 raise HTTPException(status_code=400, detail="initial_message and prompt_preamble are required if no agent_id provided")
             agent_config.initial_message = BaseMessage(text=req.initial_message)
             agent_config.prompt_preamble = req.prompt_preamble
-            agent_config.type = req.agent_type or "agent_langchain"
+            agent_config.agent_type = req.agent_type or "agent_langchain"
             logger.info(f"Using provided initial_message: {req.initial_message[:120]} and prompt_preamble: {req.prompt_preamble[:120]}")
         lead = req.lead or {}
         if lead:
@@ -13637,7 +13637,7 @@ async def outbound_call(req: OutboundCallRequest):
         config_data = {
             "prompt_preamble": agent_config.prompt_preamble,
             "initial_message": agent_config.initial_message.text,
-            "agent_type": agent_config.type
+            "agent_type": agent_config.agent_type
         }
         r.set(call_key, json.dumps(config_data), ex=3600)
         logger.info(f"Saved agent config in Redis under call_key {call_key}")
@@ -13654,6 +13654,9 @@ async def outbound_call(req: OutboundCallRequest):
     except Exception as e:
         logger.error(f"/outbound_call failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+
 
 
 
@@ -13662,20 +13665,11 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     twilio_phone = TWILIO_PHONE_NUMBER
     twilio_base_url = f"https://{BASE_URL}"
-    
-    # Use provided initial_message or raise error if missing
     if not agent_config.initial_message:
         raise ValueError("initial_message is required in agent_config")
     initial_message = agent_config.initial_message.text
-
-    # Generate unique call_sid if needed
     call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
-
-    # Pass call_sid in URL for inbound webhook
     twiml_url = f"{twilio_base_url}/inbound_call?call_sid={call_sid}"
-
-
-
     call = await asyncio.get_event_loop().run_in_executor(
         None,
         lambda: client.calls.create(
@@ -13690,23 +13684,16 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
         )
     )
     logger.info(f"Call initiated: TwilioSID={call.sid} | type={call_type} | agent_type={agent_type}")
-
-    # Save full agent_config to InMemoryConfigManager
     res2 = config_manager.save_config(call.sid, agent_config)
     if asyncio.iscoroutine(res2):
         await res2
-
-    # Save only specified fields to Redis
     config_data = {
         "prompt_preamble": agent_config.prompt_preamble,
         "initial_message": agent_config.initial_message.text,
-        "agent_type": agent_config.type
+        "agent_type": agent_config.agent_type
     }
     r.set(call.sid, json.dumps(config_data), ex=3600)
     logger.info(f"Mirrored agent config save in Redis: custom_id={call_sid} -> TwilioSID={call.sid} with init_message head: {agent_config.initial_message.text[:120]}")
-
-
-
     if call.sid not in LEAD_CONTEXT_STORE:
         LEAD_CONTEXT_STORE[call.sid] = {"to_phone": to_phone, "call_type": call_type, **(lead or {})}
     CONVERSATION_STORE.setdefault(call.sid, {
@@ -13741,7 +13728,7 @@ async def inbound_call(request: Request):
                         provider="groq",
                         prompt_preamble=config_data.get("prompt_preamble"),
                         initial_message=BaseMessage(text=config_data.get("initial_message")),
-                        type=config_data.get("agent_type", "agent_langchain")
+                        agent_type=config_data.get("agent_type", "agent_langchain")
                     )
                     await config_manager.save_config(call_sid, agent_config)
                     logger.info(f"Restored agent config from Redis for call_sid: {call_sid}")

@@ -13249,7 +13249,7 @@ transcriber_config = DeepgramTranscriberConfig(
 
 agent_config = LangchainAgentConfig(
     # initial_message=BaseMessage(text="Hello, this is Priya from 4champz, a leading chess coaching service in Bengaluru. Do you have 5-10 minutes to discuss some exciting chess coaching opportunities with schools in Bangalore?"),
-    # prompt_preamble=CHESS_COACH_PROMPT_PREAMBLE,
+    prompt_preamble="",
     model_name="llama-3.1-8b-instant",
     # model_name="groq/compound-mini",
     api_key=GROQ_API_KEY,

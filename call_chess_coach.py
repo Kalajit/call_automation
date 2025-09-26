@@ -13714,23 +13714,31 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
     twilio_phone = TWILIO_PHONE_NUMBER
     twilio_base_url = f"https://{BASE_URL}"
     
-    # Use provided initial_message or raise error if missing
     if not agent_config.initial_message:
         raise ValueError("initial_message is required in agent_config")
     initial_message = agent_config.initial_message.text
 
-    # Generate unique call_sid if needed
     call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
 
-    # CHANGED: Use a temporary webhook URL since call.sid isn't available yet
-    temp_twiml_url = f"{twilio_base_url}/inbound_call?call_sid={call_sid}"
+    # CHANGED: Use a temporary call_sid for config storage, to be replaced after call creation
+    temp_call_sid = call_sid
 
+    # CHANGED: Save config in Redis under temp_call_sid for now
+    config_data = {
+        "prompt_preamble": agent_config.prompt_preamble,
+        "initial_message": agent_config.initial_message.text,
+        "agent_type": agent_config.agent_type
+    }
+    r.set(temp_call_sid, json.dumps(config_data), ex=3600)
+    logger.info(f"Saved agent config in Redis under temp_call_sid: {temp_call_sid}")
+
+    # CHANGED: Use a placeholder webhook URL; will map to call.sid later
     call = await asyncio.get_event_loop().run_in_executor(
         None,
         lambda: client.calls.create(
             to=to_phone,
-            from_=TWILIO_PHONE_NUMBER,
-            url=temp_twiml_url,
+            from_=twilio_phone,
+            url=f"{twilio_base_url}/inbound_call?call_sid={temp_call_sid}",
             status_callback=f"{twilio_base_url}/call_status",
             status_callback_method="POST",
             status_callback_event=["initiated", "ringing", "answered", "completed"],
@@ -13740,29 +13748,14 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
     )
     logger.info(f"Call initiated: TwilioSID={call.sid} | type={call_type} | agent_type={agent_type}")
 
-    # FIXED: Save configuration under Twilio call.sid for config_manager lookup in /inbound_call
+    # CHANGED: Save configuration under Twilio call.sid for config_manager lookup
     res2 = config_manager.save_config(call.sid, agent_config)
     if asyncio.iscoroutine(res2):
         await res2
 
-    # Save only specified fields to Redis under both call_sid and Twilio CallSid for redundancy
-    config_data = {
-        "prompt_preamble": agent_config.prompt_preamble,
-        "initial_message": agent_config.initial_message.text,
-        "agent_type": agent_config.agent_type
-    }
-    r.set(call_sid, json.dumps(config_data), ex=3600)
+    # CHANGED: Save config in Redis under call.sid and keep temp_call_sid mapping
     r.set(call.sid, json.dumps(config_data), ex=3600)
-    logger.info(f"Mirrored agent config save in Redis: custom_id={call_sid} -> TwilioSID={call.sid} with init_message head: {agent_config.initial_message.text[:120]}")
-
-    # CHANGED: Update Twilio call with correct webhook URL using call.sid
-    twiml_url = f"{twilio_base_url}/inbound_call?call_sid={call.sid}"
-    await asyncio.get_event_loop().run_in_executor(
-        None,
-        lambda: client.calls(call.sid).update(url=twiml_url)
-    )
-    logger.info(f"Updated Twilio call {call.sid} with webhook URL: {twiml_url}")
-
+    logger.info(f"Mirrored agent config save in Redis: custom_id={temp_call_sid} -> TwilioSID={call.sid} with init_message head: {agent_config.initial_message.text[:120]}")
 
     if call.sid not in LEAD_CONTEXT_STORE:
         LEAD_CONTEXT_STORE[call.sid] = {"to_phone": to_phone, "call_type": call_type, **(lead or {})}
@@ -13785,62 +13778,76 @@ async def inbound_call(request: Request):
     try:
         data = await request.form()
         call_sid = data.get("CallSid") or request.query_params.get("call_sid")
-        # CHANGED: Log call_sid from both form data and query params
+        # CHANGED: Log call_sid from both sources and attempt mapping
         logger.debug(f"Received inbound call with call_sid: {call_sid}, form CallSid: {data.get('CallSid')}, query call_sid: {request.query_params.get('call_sid')}")
-        
+
+        # CHANGED: Try config_manager with call_sid, then map to Twilio CallSid via Redis if needed
         agent_config = await config_manager.get_config(call_sid)
-        # CHANGED: Log config_manager lookup result
         logger.debug(f"Config manager lookup for call_sid={call_sid}: {'Found' if agent_config else 'Not found'}")
         
-        if agent_config is None:
-            # CHANGED: Log Redis lookup attempt
-            logger.debug(f"No config in config_manager for call_sid={call_sid}, attempting Redis fallback")
-            config_json = r.get(call_sid)
-            # CHANGED: Log raw Redis response
-            logger.debug(f"Redis lookup for call_sid={call_sid}: {config_json}")
-            if config_json:
-                try:
+        if agent_config is None and call_sid.startswith("outbound_"):
+            # CHANGED: Try to map custom call_sid to Twilio CallSid
+            try:
+                config_json = r.get(call_sid)
+                logger.debug(f"Redis lookup for call_sid={call_sid}: {config_json}")
+                if config_json:
                     config_data = json.loads(config_json)
-                    # CHANGED: Log parsed config data
                     logger.debug(f"Parsed config_data from Redis: {config_data}")
-                    if not config_data.get("prompt_preamble") or not config_data.get("initial_message"):
-                        # CHANGED: Log missing fields
-                        logger.warning(f"Missing required fields in Redis config for call_sid={call_sid}")
-                        raise HTTPException(status_code=400, detail="Stored config lacks required fields")
-                    agent_config = CustomLangchainAgentConfig(
-                        model_name="llama-3.1-8b-instant",
-                        api_key=GROQ_API_KEY,
-                        provider="groq",
-                        prompt_preamble=config_data.get("prompt_preamble"),
-                        initial_message=BaseMessage(text=config_data.get("initial_message")),
-                        agent_type=config_data.get("agent_type", "agent_langchain")
-                    )
-                    await config_manager.save_config(call_sid, agent_config)
-                    # CHANGED: Log successful Redis restore
-                    logger.info(f"Restored agent config from Redis for call_sid: {call_sid}")
-                except json.JSONDecodeError as e:
-                    # CHANGED: Log JSON parsing errors
-                    logger.error(f"Failed to parse Redis config for call_sid={call_sid}: {str(e)}")
-                    raise HTTPException(status_code=400, detail="Invalid config in Redis")
-            if agent_config is None:
-                # CHANGED: Log fallback to default
-                logger.warning(f"No agent config found for call_sid: {call_sid}, using default message")
-                initial_message = "Hello, how can I assist you today?"
-                response_el = Element('Response')
-                say_el = Element('Say')
-                say_el.text = initial_message
-                response_el.append(say_el)
-                twiml_str = tostring(response_el)
-                return Response(content=twiml_str, media_type="application/xml")
+                    # CHANGED: Check for Twilio CallSid in Redis or try config_manager keys
+                    for key in config_manager.configs.keys():  # Assuming config_manager has a dict-like interface
+                        if key.startswith("CA") and r.get(key) == config_json:
+                            call_sid = key
+                            agent_config = await config_manager.get_config(call_sid)
+                            logger.info(f"Mapped custom call_sid={call_sid} to Twilio CallSid={key}")
+                            break
+            except redis.RedisError as e:
+                logger.error(f"Redis error for call_sid={call_sid}: {str(e)}")
         
-        # CHANGED: Log loaded agent config details
+        if agent_config is None:
+            # CHANGED: Retry Redis lookup with error handling
+            logger.debug(f"No config in config_manager for call_sid={call_sid}, attempting Redis fallback")
+            try:
+                config_json = r.get(call_sid)
+                logger.debug(f"Redis lookup for call_sid={call_sid}: {config_json}")
+                if config_json:
+                    try:
+                        config_data = json.loads(config_json)
+                        logger.debug(f"Parsed config_data from Redis: {config_data}")
+                        if not config_data.get("prompt_preamble") or not config_data.get("initial_message"):
+                            logger.warning(f"Missing required fields in Redis config for call_sid={call_sid}")
+                            raise HTTPException(status_code=400, detail="Stored config lacks required fields")
+                        agent_config = CustomLangchainAgentConfig(
+                            model_name="llama-3.1-8b-instant",
+                            api_key=GROQ_API_KEY,
+                            provider="groq",
+                            prompt_preamble=config_data.get("prompt_preamble"),
+                            initial_message=BaseMessage(text=config_data.get("initial_message")),
+                            agent_type=config_data.get("agent_type", "agent_langchain")
+                        )
+                        await config_manager.save_config(call_sid, agent_config)
+                        logger.info(f"Restored agent config from Redis for call_sid: {call_sid}")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Failed to parse Redis config for call_sid={call_sid}: {str(e)}")
+                        raise HTTPException(status_code=400, detail="Invalid config in Redis")
+            except redis.RedisError as e:
+                logger.error(f"Redis error in fallback for call_sid={call_sid}: {str(e)}")
+        
+        if agent_config is None:
+            logger.warning(f"No agent config found for call_sid: {call_sid}, using default message")
+            initial_message = "Hello, how can I assist you today?"
+            response_el = Element('Response')
+            say_el = Element('Say')
+            say_el.text = initial_message
+            response_el.append(say_el)
+            twiml_str = tostring(response_el)
+            return Response(content=twiml_str, media_type="application/xml")
+        
         logger.info(f"Loaded agent config for call_sid: {call_sid} - agent_type: {agent_config.agent_type}, initial_message: {agent_config.initial_message.text if agent_config.initial_message else 'None'}")
         return await telephony_server.create_inbound_call(
             request=request,
             agent_config=agent_config
         )
     except Exception as e:
-        # CHANGED: Log exception details
         logger.error(f"Error in inbound_call for call_sid={call_sid}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 

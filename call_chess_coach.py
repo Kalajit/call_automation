@@ -12406,7 +12406,7 @@ from pydub import AudioSegment  # NEW: For audio conversion (MP3/WAV)
 import wave  # NEW: For WAV file handling
 import io
 
-import check_redis
+import redis
 from redis.asyncio import Redis as AsyncRedis
 
 import urllib.parse
@@ -12592,7 +12592,7 @@ llm = ChatGroq(model_name="llama-3.1-8b-instant")
 # llm = ChatGroq(model_name="groq/compound-mini")
 
 # NEW: Redis client setup
-r = check_redis.from_url(REDIS_URL)
+r = redis.from_url(REDIS_URL)
 ar = AsyncRedis.from_url(REDIS_URL)
 
 # Config Manager
@@ -13848,7 +13848,7 @@ async def inbound_call(request: Request):
 
 
 
-        
+
 
 
 # NEW: Outbound Call Scheduler (for auto-dialing from CRM)

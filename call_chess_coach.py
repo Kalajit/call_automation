@@ -13660,16 +13660,71 @@ async def outbound_call(req: OutboundCallRequest):
 
 
 
-# Outbound call helper
+# # Outbound call helper
+# async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_type: str, agent_config: AgentConfig, call_sid: str = None):
+#     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+#     twilio_phone = TWILIO_PHONE_NUMBER
+#     twilio_base_url = f"https://{BASE_URL}"
+#     if not agent_config.initial_message:
+#         raise ValueError("initial_message is required in agent_config")
+#     initial_message = agent_config.initial_message.text
+#     call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
+#     twiml_url = f"{twilio_base_url}/inbound_call?call_sid={call.sid}"
+#     call = await asyncio.get_event_loop().run_in_executor(
+#         None,
+#         lambda: client.calls.create(
+#             to=to_phone,
+#             from_=TWILIO_PHONE_NUMBER,
+#             url=twiml_url,
+#             status_callback=f"{twilio_base_url}/call_status",
+#             status_callback_method="POST",
+#             status_callback_event=["initiated", "ringing", "answered", "completed"],
+#             record=True,
+#             recording_channels="dual",
+#         )
+#     )
+#     logger.info(f"Call initiated: TwilioSID={call.sid} | type={call_type} | agent_type={agent_type}")
+#     res2 = config_manager.save_config(call.sid, agent_config)
+#     if asyncio.iscoroutine(res2):
+#         await res2
+#     config_data = {
+#         "prompt_preamble": agent_config.prompt_preamble,
+#         "initial_message": agent_config.initial_message.text,
+#         "agent_type": agent_config.agent_type
+#     }
+#     r.set(call.sid, json.dumps(config_data), ex=3600)
+#     logger.info(f"Mirrored agent config save in Redis: custom_id={call_sid} -> TwilioSID={call.sid} with init_message head: {agent_config.initial_message.text[:120]}")
+#     if call.sid not in LEAD_CONTEXT_STORE:
+#         LEAD_CONTEXT_STORE[call.sid] = {"to_phone": to_phone, "call_type": call_type, **(lead or {})}
+#     CONVERSATION_STORE.setdefault(call.sid, {
+#         "conversation_id": call.sid,
+#         "updated_at": int(time.time()*1000),
+#         "lead": LEAD_CONTEXT_STORE.get(call.sid, {}),
+#         "slots": {},
+#         "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}]
+#     })
+#     return call.sid
+
+
+
+
+
 async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_type: str, agent_config: AgentConfig, call_sid: str = None):
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     twilio_phone = TWILIO_PHONE_NUMBER
     twilio_base_url = f"https://{BASE_URL}"
+    
+    # Use provided initial_message or raise error if missing
     if not agent_config.initial_message:
         raise ValueError("initial_message is required in agent_config")
     initial_message = agent_config.initial_message.text
+
+    # Generate unique call_sid if needed
     call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
-    twiml_url = f"{twilio_base_url}/inbound_call?call_sid={call.sid}"
+
+    # FIXED: Use the custom call_sid (call_key) for webhook URL instead of call.sid (which doesn't exist yet)
+    twiml_url = f"{twilio_base_url}/inbound_call?call_sid={call_sid}"
+
     call = await asyncio.get_event_loop().run_in_executor(
         None,
         lambda: client.calls.create(
@@ -13684,16 +13739,22 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
         )
     )
     logger.info(f"Call initiated: TwilioSID={call.sid} | type={call_type} | agent_type={agent_type}")
+
+    # FIXED: Save configuration under Twilio call.sid for config_manager lookup in /inbound_call
     res2 = config_manager.save_config(call.sid, agent_config)
     if asyncio.iscoroutine(res2):
         await res2
+
+    # Save only specified fields to Redis under both call_sid and Twilio CallSid for redundancy
     config_data = {
         "prompt_preamble": agent_config.prompt_preamble,
         "initial_message": agent_config.initial_message.text,
         "agent_type": agent_config.agent_type
     }
-    r.set(call.sid, json.dumps(config_data), ex=3600)
+    r.set(call_sid, json.dumps(config_data), ex=3600)  # Save under original call_sid
+    r.set(call.sid, json.dumps(config_data), ex=3600)  # Also save under Twilio CallSid
     logger.info(f"Mirrored agent config save in Redis: custom_id={call_sid} -> TwilioSID={call.sid} with init_message head: {agent_config.initial_message.text[:120]}")
+
     if call.sid not in LEAD_CONTEXT_STORE:
         LEAD_CONTEXT_STORE[call.sid] = {"to_phone": to_phone, "call_type": call_type, **(lead or {})}
     CONVERSATION_STORE.setdefault(call.sid, {
@@ -13704,7 +13765,6 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
         "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}]
     })
     return call.sid
-
 
 
 

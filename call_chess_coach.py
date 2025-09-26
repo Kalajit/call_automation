@@ -12406,8 +12406,10 @@ from pydub import AudioSegment  # NEW: For audio conversion (MP3/WAV)
 import wave  # NEW: For WAV file handling
 import io
 
-import redis
+import check_redis
 from redis.asyncio import Redis as AsyncRedis
+
+import urllib.parse
 
 
 
@@ -12590,7 +12592,7 @@ llm = ChatGroq(model_name="llama-3.1-8b-instant")
 # llm = ChatGroq(model_name="groq/compound-mini")
 
 # NEW: Redis client setup
-r = redis.from_url(REDIS_URL)
+r = check_redis.from_url(REDIS_URL)
 ar = AsyncRedis.from_url(REDIS_URL)
 
 # Config Manager
@@ -13721,18 +13723,28 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
     call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
     temp_call_sid = call_sid
 
-    # NEW: Store agent_type, prompt_preamble, initial_message as separate Redis keys
+    # Store in Redis for fallback
     r.set(f"{temp_call_sid}:agent_type", agent_type, ex=3600)
     r.set(f"{temp_call_sid}:prompt_preamble", agent_config.prompt_preamble, ex=3600)
     r.set(f"{temp_call_sid}:initial_message", initial_message, ex=3600)
     logger.info(f"Saved agent config in Redis under temp_call_sid: {temp_call_sid} with agent_type={agent_type}, initial_message head={initial_message[:120]}")
+
+    # NEW: Encode parameters for webhook URL
+    encoded_params = {
+        "call_sid": temp_call_sid,
+        "agent_type": urllib.parse.quote(agent_type),
+        "prompt_preamble": urllib.parse.quote(agent_config.prompt_preamble or ""),
+        "initial_message": urllib.parse.quote(initial_message)
+    }
+    webhook_url = f"{twilio_base_url}/inbound_call?call_sid={encoded_params['call_sid']}&agent_type={encoded_params['agent_type']}&prompt_preamble={encoded_params['prompt_preamble']}&initial_message={encoded_params['initial_message']}"
+    logger.debug(f"Constructed webhook URL: {webhook_url}")
 
     call = await asyncio.get_event_loop().run_in_executor(
         None,
         lambda: client.calls.create(
             to=to_phone,
             from_=twilio_phone,
-            url=f"{twilio_base_url}/inbound_call?call_sid={temp_call_sid}",
+            url=webhook_url,
             status_callback=f"{twilio_base_url}/call_status",
             status_callback_method="POST",
             status_callback_event=["initiated", "ringing", "answered", "completed"],
@@ -13742,7 +13754,7 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
     )
     logger.info(f"Call initiated: TwilioSID={call.sid} | type={call_type} | agent_type={agent_type}")
 
-    # NEW: Store config under Twilio call.sid for fallback
+    # Store config under Twilio call.sid for fallback
     r.set(f"{call.sid}:agent_type", agent_type, ex=3600)
     r.set(f"{call.sid}:prompt_preamble", agent_config.prompt_preamble, ex=3600)
     r.set(f"{call.sid}:initial_message", initial_message, ex=3600)
@@ -13776,29 +13788,36 @@ async def inbound_call(request: Request):
         call_sid = data.get("CallSid") or request.query_params.get("call_sid")
         logger.debug(f"Received inbound call with call_sid={call_sid}, form CallSid={data.get('CallSid')}, query call_sid={request.query_params.get('call_sid')}")
 
-        # NEW: Retrieve agent_type, prompt_preamble, initial_message from Redis
-        agent_type = None
-        prompt_preamble = None
-        initial_message = None
-        try:
-            agent_type = r.get(f"{call_sid}:agent_type")
-            prompt_preamble = r.get(f"{call_sid}:prompt_preamble")
-            initial_message = r.get(f"{call_sid}:initial_message")
-            logger.debug(f"Redis lookup for call_sid={call_sid}: agent_type={agent_type}, prompt_preamble={prompt_preamble}, initial_message={initial_message}")
-        except redis.RedisError as e:
-            logger.error(f"Redis error for call_sid={call_sid}: {str(e)}")
+        # NEW: Retrieve parameters from query
+        agent_type = request.query_params.get("agent_type")
+        prompt_preamble = request.query_params.get("prompt_preamble")
+        initial_message = request.query_params.get("initial_message")
+        logger.debug(f"Query params: agent_type={agent_type}, prompt_preamble={prompt_preamble}, initial_message={initial_message}")
 
-        # NEW: Fallback to Twilio CallSid if provided and Redis lookup failed
-        if not all([agent_type, prompt_preamble, initial_message]) and data.get("CallSid"):
+        # NEW: Decode parameters if present
+        if all([agent_type, prompt_preamble, initial_message]):
+            agent_type = urllib.parse.unquote(agent_type)
+            prompt_preamble = urllib.parse.unquote(prompt_preamble)
+            initial_message = urllib.parse.unquote(initial_message)
+            logger.info(f"Decoded query params: agent_type={agent_type}, prompt_preamble={prompt_preamble[:120]}, initial_message={initial_message[:120]}")
+        else:
+            # Fallback to Redis
+            logger.warning(f"No query params for call_sid={call_sid}, attempting Redis lookup")
             try:
-                agent_type = r.get(f"{data.get('CallSid')}:agent_type")
-                prompt_preamble = r.get(f"{data.get('CallSid')}:prompt_preamble")
-                initial_message = r.get(f"{data.get('CallSid')}:initial_message")
-                logger.debug(f"Redis fallback lookup for CallSid={data.get('CallSid')}: agent_type={agent_type}, prompt_preamble={prompt_preamble}, initial_message={initial_message}")
-            except redis.RedisError as e:
-                logger.error(f"Redis error for CallSid={data.get('CallSid')}: {str(e)}")
+                agent_type = r.get(f"{call_sid}:agent_type")
+                prompt_preamble = r.get(f"{call_sid}:prompt_preamble")
+                initial_message = r.get(f"{call_sid}:initial_message")
+                logger.debug(f"Redis lookup for call_sid={call_sid}: agent_type={agent_type}, prompt_preamble={prompt_preamble}, initial_message={initial_message}")
+                # Fallback to Twilio CallSid
+                if not all([agent_type, prompt_preamble, initial_message]) and data.get("CallSid"):
+                    agent_type = r.get(f"{data.get('CallSid')}:agent_type")
+                    prompt_preamble = r.get(f"{data.get('CallSid')}:prompt_preamble")
+                    initial_message = r.get(f"{data.get('CallSid')}:initial_message")
+                    logger.debug(f"Redis fallback lookup for CallSid={data.get('CallSid')}: agent_type={agent_type}, prompt_preamble={prompt_preamble}, initial_message={initial_message}")
+            except check_redis.RedisError as e:
+                logger.error(f"Redis error for call_sid={call_sid}: {str(e)}")
 
-        # NEW: Create agent_config if variables are found
+        # NEW: Create agent_config if parameters are found
         if all([agent_type, prompt_preamble, initial_message]):
             agent_config = CustomLangchainAgentConfig(
                 model_name="llama-3.1-8b-instant",
@@ -13826,6 +13845,10 @@ async def inbound_call(request: Request):
     except Exception as e:
         logger.error(f"Error in inbound_call for call_sid={call_sid}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+        
 
 
 # NEW: Outbound Call Scheduler (for auto-dialing from CRM)

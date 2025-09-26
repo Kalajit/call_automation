@@ -12610,6 +12610,9 @@ CONVERSATIONS_DIR.mkdir(exist_ok=True, parents=True)  # ADDED
 LEAD_CONTEXT_STORE = {}
 CONVERSATION_STORE = {}
 
+# In-memory store for agent configurations
+AGENT_CONFIG_STORE = {}
+
 
 # Sentiment Analysis Chain (using Groq LLM)
 sentiment_prompt = PromptTemplate(
@@ -13723,20 +13726,16 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
     call_sid = call_sid or f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
     temp_call_sid = call_sid
 
-    # Store in Redis for fallback
-    r.set(f"{temp_call_sid}:agent_type", agent_type, ex=3600)
-    r.set(f"{temp_call_sid}:prompt_preamble", agent_config.prompt_preamble, ex=3600)
-    r.set(f"{temp_call_sid}:initial_message", initial_message, ex=3600)
-    logger.info(f"Saved agent config in Redis under temp_call_sid: {temp_call_sid} with agent_type={agent_type}, initial_message head={initial_message[:120]}")
-
-    # NEW: Encode parameters for webhook URL
-    encoded_params = {
-        "call_sid": temp_call_sid,
-        "agent_type": urllib.parse.quote(agent_type),
-        "prompt_preamble": urllib.parse.quote(agent_config.prompt_preamble or ""),
-        "initial_message": urllib.parse.quote(initial_message)
+    # Store agent config in memory
+    AGENT_CONFIG_STORE[temp_call_sid] = {
+        "agent_type": agent_type,
+        "prompt_preamble": agent_config.prompt_preamble,
+        "initial_message": initial_message
     }
-    webhook_url = f"{twilio_base_url}/inbound_call?call_sid={encoded_params['call_sid']}&agent_type={encoded_params['agent_type']}&prompt_preamble={encoded_params['prompt_preamble']}&initial_message={encoded_params['initial_message']}"
+    logger.info(f"Saved agent config in memory under call_sid: {temp_call_sid} with agent_type={agent_type}, initial_message head={initial_message[:120]}")
+
+    # Construct webhook URL with only call_sid
+    webhook_url = f"{twilio_base_url}/inbound_call?call_sid={temp_call_sid}"
     logger.debug(f"Constructed webhook URL: {webhook_url}")
 
     call = await asyncio.get_event_loop().run_in_executor(
@@ -13755,10 +13754,12 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
     logger.info(f"Call initiated: TwilioSID={call.sid} | type={call_type} | agent_type={agent_type}")
 
     # Store config under Twilio call.sid for fallback
-    r.set(f"{call.sid}:agent_type", agent_type, ex=3600)
-    r.set(f"{call.sid}:prompt_preamble", agent_config.prompt_preamble, ex=3600)
-    r.set(f"{call.sid}:initial_message", initial_message, ex=3600)
-    logger.info(f"Mirrored agent config in Redis under TwilioSID={call.sid} with agent_type={agent_type}, initial_message head={initial_message[:120]}")
+    AGENT_CONFIG_STORE[call.sid] = {
+        "agent_type": agent_type,
+        "prompt_preamble": agent_config.prompt_preamble,
+        "initial_message": initial_message
+    }
+    logger.info(f"Mirrored agent config in memory under TwilioSID={call.sid} with agent_type={agent_type}, initial_message head={initial_message[:120]}")
 
     # Keep config_manager for backward compatibility
     res2 = config_manager.save_config(call.sid, agent_config)
@@ -13788,46 +13789,15 @@ async def inbound_call(request: Request):
         call_sid = data.get("CallSid") or request.query_params.get("call_sid")
         logger.debug(f"Received inbound call with call_sid={call_sid}, form CallSid={data.get('CallSid')}, query call_sid={request.query_params.get('call_sid')}")
 
-        # NEW: Retrieve parameters from query
-        agent_type = request.query_params.get("agent_type")
-        prompt_preamble = request.query_params.get("prompt_preamble")
-        initial_message = request.query_params.get("initial_message")
-        logger.debug(f"Query params: agent_type={agent_type}, prompt_preamble={prompt_preamble}, initial_message={initial_message}")
+        # Retrieve agent config from in-memory store
+        config = AGENT_CONFIG_STORE.get(call_sid) or AGENT_CONFIG_STORE.get(data.get("CallSid"))
+        logger.debug(f"In-memory lookup for call_sid={call_sid} or CallSid={data.get('CallSid')}: config={config}")
 
-        # NEW: Decode parameters if present
-        if all([agent_type, prompt_preamble, initial_message]):
-            agent_type = urllib.parse.unquote(agent_type)
-            prompt_preamble = urllib.parse.unquote(prompt_preamble)
-            initial_message = urllib.parse.unquote(initial_message)
-            logger.info(f"Decoded query params: agent_type={agent_type}, prompt_preamble={prompt_preamble[:120]}, initial_message={initial_message[:120]}")
-        else:
-            # Fallback to Redis
-            logger.warning(f"No query params for call_sid={call_sid}, attempting Redis lookup")
-            try:
-                agent_type = r.get(f"{call_sid}:agent_type")
-                prompt_preamble = r.get(f"{call_sid}:prompt_preamble")
-                initial_message = r.get(f"{call_sid}:initial_message")
-                logger.debug(f"Redis lookup for call_sid={call_sid}: agent_type={agent_type}, prompt_preamble={prompt_preamble}, initial_message={initial_message}")
-                # Fallback to Twilio CallSid
-                if not all([agent_type, prompt_preamble, initial_message]) and data.get("CallSid"):
-                    agent_type = r.get(f"{data.get('CallSid')}:agent_type")
-                    prompt_preamble = r.get(f"{data.get('CallSid')}:prompt_preamble")
-                    initial_message = r.get(f"{data.get('CallSid')}:initial_message")
-                    logger.debug(f"Redis fallback lookup for CallSid={data.get('CallSid')}: agent_type={agent_type}, prompt_preamble={prompt_preamble}, initial_message={initial_message}")
-            except check_redis.RedisError as e:
-                logger.error(f"Redis error for call_sid={call_sid}: {str(e)}")
-
-        # NEW: Create agent_config if parameters are found
-        if all([agent_type, prompt_preamble, initial_message]):
-            agent_config = CustomLangchainAgentConfig(
-                model_name="llama-3.1-8b-instant",
-                api_key=GROQ_API_KEY,
-                provider="groq",
-                prompt_preamble=prompt_preamble.decode() if isinstance(prompt_preamble, bytes) else prompt_preamble,
-                initial_message=BaseMessage(text=initial_message.decode() if isinstance(initial_message, bytes) else initial_message),
-                agent_type=agent_type.decode() if isinstance(agent_type, bytes) else agent_type
-            )
-            logger.info(f"Loaded agent config for call_sid={call_sid}: agent_type={agent_config.agent_type}, initial_message={agent_config.initial_message.text}")
+        if config:
+            agent_type = config.get("agent_type")
+            prompt_preamble = config.get("prompt_preamble")
+            initial_message = config.get("initial_message")
+            logger.info(f"Loaded config from memory: agent_type={agent_type}, prompt_preamble={prompt_preamble[:120] if prompt_preamble else None}, initial_message={initial_message[:120] if initial_message else None}")
         else:
             logger.warning(f"No agent config found for call_sid={call_sid}, using default message")
             initial_message = "Hello, how can I assist you today?"
@@ -13837,6 +13807,17 @@ async def inbound_call(request: Request):
             response_el.append(say_el)
             twiml_str = tostring(response_el)
             return Response(content=twiml_str, media_type="application/xml")
+
+        # Create agent_config
+        agent_config = CustomLangchainAgentConfig(
+            model_name="llama-3.1-8b-instant",
+            api_key=GROQ_API_KEY,
+            provider="groq",
+            prompt_preamble=prompt_preamble,
+            initial_message=BaseMessage(text=initial_message),
+            agent_type=agent_type
+        )
+        logger.info(f"Loaded agent config for call_sid={call_sid}: agent_type={agent_config.agent_type}, initial_message={agent_config.initial_message.text}")
 
         return await telephony_server.create_inbound_call(
             request=request,

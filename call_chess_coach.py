@@ -13673,7 +13673,7 @@ async def outbound_call(request: Request):
     lead = data.get("lead", {})
     agent_id = data.get("agent_id")
     agent_type = data.get("agent_type", "default")
-    initial_message = data.get("initial_message")
+    initial_message = data.get("initial_message", "Hello, how can I assist you today?")
     prompt_preamble = data.get("prompt_preamble", "")
 
     agent_config = CustomLangchainAgentConfig(
@@ -13686,13 +13686,15 @@ async def outbound_call(request: Request):
     )
 
     call_key = f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
-    # Store in memory only
+    # Store in memory
     AGENT_CONFIG_STORE[call_key] = {
         "agent_type": agent_type,
         "prompt_preamble": prompt_preamble,
-        "initial_message": initial_message
+        "initial_message": initial_message,
+        "created_at": int(time.time() * 1000)
     }
-    logger.info(f"Saved agent config in memory under call_key: {call_key} with agent_type={agent_type}, initial_message head={initial_message[:120]}")
+    logger.info(f"Saved agent config in memory under call_key: {call_key} with agent_type={agent_type}, initial_message={initial_message[:120]}")
+    logger.debug(f"AGENT_CONFIG_STORE contents: {AGENT_CONFIG_STORE}")
 
     webhook_url = f"https://{BASE_URL}/inbound_call?call_sid={call_key}"
     logger.debug(f"Constructed webhook URL: {webhook_url}")
@@ -13717,9 +13719,11 @@ async def outbound_call(request: Request):
     AGENT_CONFIG_STORE[call.sid] = {
         "agent_type": agent_type,
         "prompt_preamble": prompt_preamble,
-        "initial_message": initial_message
+        "initial_message": initial_message,
+        "created_at": int(time.time() * 1000)
     }
-    logger.info(f"Mirrored agent config in memory under TwilioSID={call.sid} with agent_type={agent_type}, initial_message head={initial_message[:120]}")
+    logger.info(f"Mirrored agent config in memory under TwilioSID={call.sid} with agent_type={agent_type}, initial_message={initial_message[:120]}")
+    logger.debug(f"AGENT_CONFIG_STORE contents after TwilioSID: {AGENT_CONFIG_STORE}")
 
     # Save config for backward compatibility
     res2 = config_manager.save_config(call.sid, agent_config)
@@ -13739,7 +13743,11 @@ async def outbound_call(request: Request):
     return {"call_sid": call.sid}
     
 
-
+def cleanup_agent_config_store():
+    current_time = int(time.time() * 1000)
+    for key in list(AGENT_CONFIG_STORE.keys()):
+        if current_time - AGENT_CONFIG_STORE[key].get("created_at", 0) > 3600 * 1000:
+            del AGENT_CONFIG_STORE[key]
 
 
 
@@ -13863,21 +13871,21 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict, agent_ty
 @app.post("/inbound_call")
 async def inbound_call(request: Request):
     try:
+        cleanup_agent_config_store()  # Clean up old configs
         data = await request.form()
         call_sid = data.get("CallSid") or request.query_params.get("call_sid")
         logger.debug(f"Received inbound call with call_sid={call_sid}, form CallSid={data.get('CallSid')}, query call_sid={request.query_params.get('call_sid')}")
+        logger.debug(f"AGENT_CONFIG_STORE contents: {AGENT_CONFIG_STORE}")
 
         # Retrieve agent config from in-memory store
         config = AGENT_CONFIG_STORE.get(call_sid) or AGENT_CONFIG_STORE.get(data.get("CallSid"))
-        logger.debug(f"In-memory lookup for call_sid={call_sid} or CallSid={data.get('CallSid')}: config={config}")
-
         if config and all(k in config for k in ["agent_type", "prompt_preamble", "initial_message"]):
             agent_type = config["agent_type"]
             prompt_preamble = config["prompt_preamble"]
             initial_message = config["initial_message"]
-            logger.info(f"Loaded config from memory: agent_type={agent_type}, prompt_preamble={prompt_preamble[:120] if prompt_preamble else None}, initial_message={initial_message[:120] if initial_message else None}")
+            logger.info(f"Loaded config from memory: agent_type={agent_type}, prompt_preamble={prompt_preamble[:120] if prompt_preamble else None}, initial_message={initial_message[:120]}")
         else:
-            logger.warning(f"No valid agent config found for call_sid={call_sid}, using default message")
+            logger.warning(f"No valid agent config found for call_sid={call_sid} or CallSid={data.get('CallSid')}, using default message")
             initial_message = "Hello, how can I assist you today?"
             response_el = Element('Response')
             say_el = Element('Say')

@@ -14119,10 +14119,10 @@ async def outbound_call(request: Request):
     agent_id = data.get("agent_id") or f"agent_{uuid.uuid4()}"
     agent_type = data.get("agent_type", "default")
 
-    # Retrieve or set prompt configuration
+    # Retrieve prompt configuration, prioritizing PROMPT_CONFIGS
     prompt_config = PROMPT_CONFIGS.get(agent_type, PROMPT_CONFIGS["default"])
-    initial_message = data.get("initial_message", prompt_config["initial_message"])
-    prompt_preamble = data.get("prompt_preamble", prompt_config["prompt_preamble"])
+    initial_message = prompt_config["initial_message"].replace("{{name}}", lead.get("name", "there"))
+    prompt_preamble = prompt_config["prompt_preamble"]
 
     call_key = f"outbound_{int(time.time()*1000)}_{hash(to_phone)}"
     AGENT_CONFIG_STORE[call_key] = {
@@ -14143,7 +14143,7 @@ async def outbound_call(request: Request):
         model_name="llama-3.1-8b-instant",
         api_key=GROQ_API_KEY,
         provider="groq",
-        prompt_preamble=prompt_preamble,
+        prompt_preamble=prompt_preamble or "",
         initial_message=BaseMessage(text=initial_message),
         agent_type=agent_type,
     )
@@ -14321,26 +14321,28 @@ async def inbound_call(request: Request):
         logger.debug(f"Received inbound call with call_sid={call_sid}, form CallSid={data.get('CallSid')}, query call_sid={request.query_params.get('call_sid')}")
         logger.debug(f"AGENT_CONFIG_STORE contents: {AGENT_CONFIG_STORE}")
 
+        # Try to retrieve config using call_sid or CallSid
         config = AGENT_CONFIG_STORE.get(call_sid) or AGENT_CONFIG_STORE.get(data.get("CallSid"))
         if config and "agent_id" in config:
             agent_id = config["agent_id"]
-            agent_config_data = AGENT_CONFIG_STORE.get(agent_id, PROMPT_CONFIGS["default"])
-            agent_type = agent_config_data["agent_type"]
-            prompt_preamble = agent_config_data["prompt_preamble"]
-            initial_message = agent_config_data["initial_message"]
-            logger.info(f"Loaded config from memory: agent_id={agent_id}, agent_type={agent_type}, prompt_preamble={prompt_preamble[:120] if prompt_preamble else None}, initial_message={initial_message[:120]}")
+            agent_config_data = AGENT_CONFIG_STORE.get(agent_id)
+            if agent_config_data:
+                agent_type = agent_config_data["agent_type"]
+                prompt_preamble = agent_config_data["prompt_preamble"]
+                initial_message = agent_config_data["initial_message"]
+                logger.info(f"Successfully loaded config from memory: call_sid={call_sid}, agent_id={agent_id}, agent_type={agent_type}, prompt_preamble={prompt_preamble[:120] if prompt_preamble else None}, initial_message={initial_message[:120]}")
+            else:
+                logger.warning(f"No agent config found for agent_id={agent_id}, falling back to default")
+                agent_type = "default"
+                prompt_config = PROMPT_CONFIGS["default"]
+                prompt_preamble = prompt_config["prompt_preamble"]
+                initial_message = prompt_config["initial_message"]
         else:
-            logger.warning(f"No valid agent config found for call_sid={call_sid} or CallSid={data.get('CallSid')}, using default message")
+            logger.warning(f"No valid config found for call_sid={call_sid} or CallSid={data.get('CallSid')}, falling back to default")
             agent_type = "default"
             prompt_config = PROMPT_CONFIGS["default"]
             prompt_preamble = prompt_config["prompt_preamble"]
             initial_message = prompt_config["initial_message"]
-            response_el = Element('Response')
-            say_el = Element('Say')
-            say_el.text = initial_message
-            response_el.append(say_el)
-            twiml_str = tostring(response_el)
-            return Response(content=twiml_str, media_type="application/xml")
 
         agent_config = CustomLangchainAgentConfig(
             model_name="llama-3.1-8b-instant",
@@ -14359,7 +14361,6 @@ async def inbound_call(request: Request):
     except Exception as e:
         logger.error(f"Error in inbound_call for call_sid={call_sid}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 
 

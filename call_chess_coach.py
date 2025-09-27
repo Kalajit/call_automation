@@ -15173,8 +15173,21 @@ class CustomLangchainAgentConfig(LangchainAgentConfig, type="agent_langchain"):
 
 # Custom Langchain Agent
 class CustomLangchainAgent(LangchainAgent):
-    def __init__(self, agent_config: CustomLangchainAgentConfig):
-        logger.debug(f"Initializing CustomLangchainAgent with config: {agent_config}")
+    def __init__(self, agent_config: CustomLangchainAgentConfig, conversation_id: Optional[str] = None):
+        logger.debug(f"Initializing CustomLangchainAgent with config: {agent_config}, conversation_id: {conversation_id}")
+        # Check LEAD_CONTEXT_STORE for agent_type if conversation_id is provided
+        if conversation_id and conversation_id in LEAD_CONTEXT_STORE:
+            agent_type = LEAD_CONTEXT_STORE[conversation_id].get("agent_type", "chess_coach")
+            agent_type = agent_type if agent_type in PROMPT_CONFIGS else "default"
+            # Override agent_config with dynamic prompt based on agent_type
+            agent_config = CustomLangchainAgentConfig(
+                initial_message=BaseMessage(text=PROMPT_CONFIGS[agent_type]["initial_message"]),
+                prompt_preamble=PROMPT_CONFIGS[agent_type]["prompt_preamble"],
+                model_name=agent_config.model_name,
+                api_key=agent_config.api_key,
+                provider=agent_config.provider,
+            )
+        logger.debug(f"Using agent_type: {agent_type}")
         super().__init__(agent_config=agent_config)
         self.last_response_time = time.time()
         self.conversation_state = "initial"
@@ -15182,9 +15195,8 @@ class CustomLangchainAgent(LangchainAgent):
         self.user_name = None  # store extracted/confirmed name
         self.asked_for_name = False  # track if name is requested
         logger.debug("Initialized CustomLangchainAgent with Groq LLM (llama-3.1-8b-instant)")
-        # ADDED for JSON capture with LLM extraction
         self.turns = []  # [{"speaker":"user"/"bot","text":..., "ts": epoch_ms}]
-        self.conversation_id_cache = None  # to index the global store
+        self.conversation_id_cache = conversation_id  # to index the global store
         self.extracted_slots = {}  # LLM-extracted structured data
 
 
@@ -15702,12 +15714,13 @@ async def get_conversation(call_sid: str):
     raise HTTPException(status_code=404, detail="Conversation not found")
 
 
-# ADDED n8n: request schema for outbound_call
 class OutboundCallRequest(BaseModel):
     to_phone: str
     lead: typing.Optional[typing.Dict[str, typing.Any]] = None
     transcript_callback_url: typing.Optional[str] = None
     call_type: str = "qualification"  # NEW: qualification, reminder, payment
+    agent_type: str  # NEW: Required, no default
+    agent_id: typing.Optional[str] = None  # NEW: Optional agent_id
 
 # ADDED n8n: normalize to E164 basic
 def normalize_e164(number: str) -> str:
@@ -15730,11 +15743,26 @@ async def outbound_call(req: OutboundCallRequest):
         to_phone = normalize_e164(req.to_phone)
         if not to_phone or len(to_phone) < 10:
             raise HTTPException(status_code=400, detail="Invalid phone")
+        # Validate agent_type
+        if req.agent_type not in PROMPT_CONFIGS:
+            raise HTTPException(status_code=400, detail=f"Invalid agent_type: {req.agent_type}. Must be one of {list(PROMPT_CONFIGS.keys())}")
+        # Create dynamic agent_config based on agent_type
+        agent_config = CustomLangchainAgentConfig(
+            initial_message=BaseMessage(text=PROMPT_CONFIGS[req.agent_type]["initial_message"]),
+            prompt_preamble=PROMPT_CONFIGS[req.agent_type]["prompt_preamble"],
+            model_name="llama-3.1-8b-instant",
+            api_key=GROQ_API_KEY,
+            provider="groq",
+        )
+        # Store agent_config in config_manager for this call
+        await config_manager.save_agent_config(call_sid=None, agent_config=agent_config)
         sid = await make_outbound_call(to_phone, req.call_type, req.lead)
         lead = req.lead or {}
         lead["to_phone"] = to_phone
+        lead["agent_type"] = req.agent_type  # Store agent_type for agent use
+        lead["agent_id"] = req.agent_id  # Store agent_id if provided
         LEAD_CONTEXT_STORE[sid] = lead
-        logger.info(f"Outbound call requested via n8n: SID={sid}, lead={lead}")
+        logger.info(f"Outbound call requested via n8n: SID={sid}, lead={lead}, agent_type={req.agent_type}")
         if req.transcript_callback_url:
             os.environ["TRANSCRIPT_CALLBACK_URL"] = req.transcript_callback_url
         return {"ok": True, "call_sid": sid}
@@ -15749,11 +15777,14 @@ async def outbound_call(req: OutboundCallRequest):
 async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None):
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     twilio_base_url = f"https://{BASE_URL}"
+    # Use agent_type from lead if available, else default to chess_coach
+    agent_type = lead.get("agent_type", "chess_coach") if lead else "chess_coach"
+    agent_type = agent_type if agent_type in PROMPT_CONFIGS else "default"
     initial_message = {
-        "qualification": "Hello, this is Priya from 4champz. Available to discuss chess coaching?",
+        "qualification": PROMPT_CONFIGS[agent_type]["initial_message"],
         "reminder": f"This is a reminder for your demo on {lead.get('demo_date', time.strftime('%Y-%m-%d %H:%M IST', time.localtime(time.time() + 86400)))}. Ready?",
         "payment": f"Payment reminder for ₹500 due by {lead.get('due_date', time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400)))}. Settled?"
-    }.get(call_type, "Hello, this is Priya from 4champz. How can I assist?")
+    }.get(call_type, PROMPT_CONFIGS[agent_type]["initial_message"])
     call = await asyncio.get_event_loop().run_in_executor(
         None,
         lambda: client.calls.create(
@@ -15765,12 +15796,11 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None):
             status_callback_event=["initiated", "ringing", "answered", "completed"],
             record=True,
             recording_channels="dual",
-            
         )
     )
-    logger.info(f"Call initiated: SID={call.sid}, type={call_type}")
+    logger.info(f"Call initiated: SID={call.sid}, type={call_type}, agent_type={agent_type}")
     if call.sid not in LEAD_CONTEXT_STORE:
-        LEAD_CONTEXT_STORE[call.sid] = {"to_phone": to_phone, "call_type": call_type, **(lead or {})}
+        LEAD_CONTEXT_STORE[call.sid] = {"to_phone": to_phone, "call_type": call_type, "agent_type": agent_type, **(lead or {})}
     CONVERSATION_STORE.setdefault(call.sid, {
         "conversation_id": call.sid,
         "updated_at": int(time.time()*1000),

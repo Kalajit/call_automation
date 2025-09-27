@@ -14439,6 +14439,7 @@ from fastapi.logger import logger as fastapi_logger
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from twilio.rest import Client
+from twilio.base.exceptions import TwilioRestException
 from vocode.streaming.telephony.server.base import TelephonyServer, TwilioInboundCallConfig
 from vocode.streaming.models.telephony import TwilioConfig
 from vocode.streaming.models.agent import LangchainAgentConfig, AgentConfig
@@ -15783,7 +15784,7 @@ async def outbound_call(req: OutboundCallRequest):
         logger.debug(f"Received outbound call request: {req.dict()}")
         to_phone = normalize_e164(req.to_phone)
         if not to_phone or len(to_phone) < 10:
-            raise HTTPException(status_code=400, detail="Invalid phone")
+            raise HTTPException(status_code=400, detail="Invalid phone number format")
 
         # Validate agent_type
         if req.agent_type not in PROMPT_CONFIGS:
@@ -15822,12 +15823,20 @@ async def outbound_call(req: OutboundCallRequest):
         if req.transcript_callback_url:
             os.environ["TRANSCRIPT_CALLBACK_URL"] = req.transcript_callback_url
         return {"ok": True, "call_sid": sid}
-    except HTTPException:
+    except HTTPException as e:
         raise
+    except TwilioRestException as e:
+        logger.error(f"Twilio error in outbound_call: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to initiate call: {str(e)}")
     except Exception as e:
-        logger.error(f"/outbound_call failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"/outbound_call failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
 
 
 
@@ -15846,37 +15855,41 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
         "{{name}}", lead.get("name", "there") if lead else "there"
     )
     
-    call = await asyncio.get_event_loop().run_in_executor(
-        None,
-        lambda: client.calls.create(
-            to=to_phone,
-            from_=TWILIO_PHONE_NUMBER,
-            url=f"{twilio_base_url}/inbound_call",
-            status_callback=f"{twilio_base_url}/call_status",
-            status_callback_method="POST",
-            status_callback_event=["initiated", "ringing", "answered", "completed"],
-            record=True,
-            recording_channels="dual",
+    try:
+        call = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: client.calls.create(
+                to=to_phone,
+                from_=TWILIO_PHONE_NUMBER,
+                url=f"{twilio_base_url}/inbound_call",
+                status_callback=f"{twilio_base_url}/call_status",
+                status_callback_method="POST",
+                status_callback_event=["initiated", "ringing", "answered", "completed"],
+                record=True,
+                recording_channels="dual",
+            )
         )
-    )
-    logger.info(f"Call initiated: SID={call.sid}, type={call_type}, agent_type={agent_type}")
-    if call.sid not in LEAD_CONTEXT_STORE:
-        LEAD_CONTEXT_STORE[call.sid] = {
-            "to_phone": to_phone,
-            "call_type": call_type,
-            "agent_type": agent_type,
-            "initial_message": initial_message,
-            "prompt_preamble": PROMPT_CONFIGS[agent_type]["prompt_preamble"],
-            **(lead or {})
+        logger.info(f"Call initiated: SID={call.sid}, type={call_type}, agent_type={agent_type}")
+        if call.sid not in LEAD_CONTEXT_STORE:
+            LEAD_CONTEXT_STORE[call.sid] = {
+                "to_phone": to_phone,
+                "call_type": call_type,
+                "agent_type": agent_type,
+                "initial_message": initial_message,
+                "prompt_preamble": PROMPT_CONFIGS[agent_type]["prompt_preamble"],
+                **(lead or {})
+            }
+        CONVERSATION_STORE[call.sid] = {
+            "conversation_id": call.sid,
+            "updated_at": int(time.time()*1000),
+            "lead": LEAD_CONTEXT_STORE[call.sid],
+            "slots": {},
+            "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}]
         }
-    CONVERSATION_STORE[call.sid] = {
-        "conversation_id": call.sid,
-        "updated_at": int(time.time()*1000),
-        "lead": LEAD_CONTEXT_STORE[call.sid],
-        "slots": {},
-        "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}]
-    }
-    return call.sid
+        return call.sid
+    except TwilioRestException as e:
+        logger.error(f"Twilio error in make_outbound_call: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to initiate call: {str(e)}")
 
 
 

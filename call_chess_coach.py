@@ -15165,7 +15165,7 @@ async def save_recording(conversation_id: str) -> str:
 
 # Custom Agent Config
 class CustomLangchainAgentConfig(LangchainAgentConfig, type="agent_langchain"):
-    initial_message: BaseMessage = BaseMessage(text="Hello, this is Priya from 4champz, a leading chess coaching service in Bengaluru. Do you have 5-10 minutes to discuss some exciting chess coaching opportunities with schools in Bangalore?")
+    initial_message: BaseMessage  # Remove default, make required
     prompt_preamble: str = PROMPT_CONFIGS["chess_coach"]["prompt_preamble"]
     model_name: str = "llama-3.1-8b-instant"
     api_key: str = GROQ_API_KEY
@@ -15182,10 +15182,29 @@ class CustomLangchainAgent(LangchainAgent):
                 agent_config = CustomLangchainAgentConfig(**lead["agent_config"])
             else:
                 agent_type = lead.get("agent_type", "chess_coach")
-                agent_type = agent_type if agent_type in PROMPT_CONFIGS else "chess_coach"
+                if agent_type not in PROMPT_CONFIGS:
+                    logger.error(f"Invalid agent_type: {agent_type}. Falling back to 'chess_coach'")
+                    agent_type = "chess_coach"
                 agent_config = CustomLangchainAgentConfig(
-                    initial_message=BaseMessage(text=PROMPT_CONFIGS[agent_type]["initial_message"].replace("{{name}}", lead.get("name", "there") if lead else "there")),
+                    initial_message=BaseMessage(
+                        text=PROMPT_CONFIGS[agent_type]["initial_message"].replace(
+                            "{{name}}", lead.get("name", "there") if lead else "there"
+                        )
+                    ),
                     prompt_preamble=PROMPT_CONFIGS[agent_type]["prompt_preamble"],
+                    model_name=agent_config.model_name,
+                    api_key=agent_config.api_key,
+                    provider=agent_config.provider,
+                )
+        else:
+            # Ensure agent_config has a valid initial_message
+            if not agent_config.initial_message or not agent_config.initial_message.text:
+                logger.error("No valid initial_message provided in agent_config. Using default chess_coach message.")
+                agent_config = CustomLangchainAgentConfig(
+                    initial_message=BaseMessage(
+                        text=PROMPT_CONFIGS["chess_coach"]["initial_message"].replace("{{name}}", "there")
+                    ),
+                    prompt_preamble=PROMPT_CONFIGS["chess_coach"]["prompt_preamble"],
                     model_name=agent_config.model_name,
                     api_key=agent_config.api_key,
                     provider=agent_config.provider,
@@ -15656,7 +15675,9 @@ transcriber_config = DeepgramTranscriberConfig(
 )
 
 agent_config = CustomLangchainAgentConfig(
-    initial_message=BaseMessage(text=PROMPT_CONFIGS["chess_coach"]["initial_message"]),
+    initial_message=BaseMessage(
+        text=PROMPT_CONFIGS["chess_coach"]["initial_message"].replace("{{name}}", "there")
+    ),
     prompt_preamble=PROMPT_CONFIGS["chess_coach"]["prompt_preamble"],
     model_name="llama-3.1-8b-instant",
     api_key=GROQ_API_KEY,
@@ -15700,11 +15721,18 @@ app.include_router(telephony_server.get_router())
 # NEW: Endpoint to handle Twilio call status callbacks for inbound calls
 @app.post("/call_status")
 async def call_status(request: Request):
-    data = await request.json()
-    call_sid = data.get("CallSid")
-    if data.get("CallStatus") == "completed":
-        logger.info(f"Inbound call {call_sid} completed")
-    return {"ok": True}
+    try:
+        data = await request.json()
+        call_sid = data.get("CallSid")
+        if data.get("CallStatus") == "completed":
+            logger.info(f"Inbound call {call_sid} completed")
+        return {"ok": True}
+    except json.JSONDecodeError:
+        logger.warning("Received non-JSON data in call_status callback")
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"Error in call_status: {e}")
+        return {"ok": False}
 
 
 # NEW: Endpoint to serve conversation JSON files
@@ -15749,10 +15777,15 @@ async def outbound_call(req: OutboundCallRequest):
             raise HTTPException(status_code=400, detail="Invalid phone")
         # Validate agent_type
         if req.agent_type not in PROMPT_CONFIGS:
-            raise HTTPException(status_code=400, detail=f"Invalid agent_type: {req.agent_type}. Must be one of {list(PROMPT_CONFIGS.keys())}")
+            logger.error(f"Invalid agent_type: {req.agent_type}. Falling back to 'chess_coach'")
+            req.agent_type = "chess_coach"
         # Create dynamic agent_config
         agent_config = CustomLangchainAgentConfig(
-            initial_message=BaseMessage(text=PROMPT_CONFIGS[req.agent_type]["initial_message"].replace("{{name}}", req.lead.get("name", "there") if req.lead else "there")),
+            initial_message=BaseMessage(
+                text=PROMPT_CONFIGS[req.agent_type]["initial_message"].replace(
+                    "{{name}}", req.lead.get("name", "there") if req.lead else "there"
+                )
+            ),
             prompt_preamble=PROMPT_CONFIGS[req.agent_type]["prompt_preamble"],
             model_name="llama-3.1-8b-instant",
             api_key=GROQ_API_KEY,
@@ -15779,10 +15812,12 @@ async def outbound_call(req: OutboundCallRequest):
 async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, agent_type: str = "chess_coach"):
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     twilio_base_url = f"https://{BASE_URL}"
-    # Use provided agent_type, validated in /outbound_call
+    # Validate agent_type
     agent_type = agent_type if agent_type in PROMPT_CONFIGS else "chess_coach"
     initial_message = {
-        "qualification": PROMPT_CONFIGS[agent_type]["initial_message"].replace("{{name}}", lead.get("name", "there") if lead else "there"),
+        "qualification": PROMPT_CONFIGS[agent_type]["initial_message"].replace(
+            "{{name}}", lead.get("name", "there") if lead else "there"
+        ),
         "reminder": f"This is a reminder for your demo on {lead.get('demo_date', time.strftime('%Y-%m-%d %H:%M IST', time.localtime(time.time() + 86400)))}. Ready?",
         "payment": f"Payment reminder for ₹500 due by {lead.get('due_date', time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400)))}. Settled?"
     }.get(call_type, PROMPT_CONFIGS[agent_type]["initial_message"])

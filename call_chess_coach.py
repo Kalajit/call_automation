@@ -15175,19 +15175,19 @@ class CustomLangchainAgentConfig(LangchainAgentConfig, type="agent_langchain"):
 class CustomLangchainAgent(LangchainAgent):
     def __init__(self, agent_config: CustomLangchainAgentConfig, conversation_id: Optional[str] = None):
         logger.debug(f"Initializing CustomLangchainAgent with config: {agent_config}, conversation_id: {conversation_id}")
-        # Use agent_config from LEAD_CONTEXT_STORE if available
+        
+        # Check if conversation_id exists in LEAD_CONTEXT_STORE and use its agent_config if available
         if conversation_id and conversation_id in LEAD_CONTEXT_STORE:
             lead = LEAD_CONTEXT_STORE[conversation_id]
-            if "agent_config" in lead:
+            agent_type = lead.get("agent_type", None)
+            if "agent_config" in lead and lead["agent_config"]:
                 agent_config = CustomLangchainAgentConfig(**lead["agent_config"])
-            else:
-                agent_type = lead.get("agent_type", "chess_coach")
-                if agent_type not in PROMPT_CONFIGS:
-                    logger.error(f"Invalid agent_type: {agent_type}. Falling back to 'chess_coach'")
-                    agent_type = "chess_coach"
+            elif agent_type and agent_type in PROMPT_CONFIGS:
+                # Use the agent_type from LEAD_CONTEXT_STORE and the provided initial_message if available
+                initial_message_text = lead.get("initial_message", PROMPT_CONFIGS[agent_type]["initial_message"])
                 agent_config = CustomLangchainAgentConfig(
                     initial_message=BaseMessage(
-                        text=PROMPT_CONFIGS[agent_type]["initial_message"].replace(
+                        text=initial_message_text.replace(
                             "{{name}}", lead.get("name", "there") if lead else "there"
                         )
                     ),
@@ -15196,19 +15196,15 @@ class CustomLangchainAgent(LangchainAgent):
                     api_key=agent_config.api_key,
                     provider=agent_config.provider,
                 )
+            else:
+                logger.error(f"Invalid or missing agent_type in LEAD_CONTEXT_STORE: {agent_type}")
+                raise ValueError(f"Invalid agent_type: {agent_type}. Please provide a valid agent_type in PROMPT_CONFIGS.")
         else:
-            # Ensure agent_config has a valid initial_message
+            # Validate provided agent_config
             if not agent_config.initial_message or not agent_config.initial_message.text:
-                logger.error("No valid initial_message provided in agent_config. Using default chess_coach message.")
-                agent_config = CustomLangchainAgentConfig(
-                    initial_message=BaseMessage(
-                        text=PROMPT_CONFIGS["chess_coach"]["initial_message"].replace("{{name}}", "there")
-                    ),
-                    prompt_preamble=PROMPT_CONFIGS["chess_coach"]["prompt_preamble"],
-                    model_name=agent_config.model_name,
-                    api_key=agent_config.api_key,
-                    provider=agent_config.provider,
-                )
+                logger.error("No valid initial_message provided in agent_config.")
+                raise ValueError("No valid initial_message provided in agent_config.")
+        
         logger.debug(f"Using agent_type: {agent_config.initial_message.text.split(' from ')[1].split(',')[0]}")
         super().__init__(agent_config=agent_config)
         self.last_response_time = time.time()
@@ -15775,27 +15771,36 @@ async def outbound_call(req: OutboundCallRequest):
         to_phone = normalize_e164(req.to_phone)
         if not to_phone or len(to_phone) < 10:
             raise HTTPException(status_code=400, detail="Invalid phone")
+
         # Validate agent_type
         if req.agent_type not in PROMPT_CONFIGS:
-            logger.error(f"Invalid agent_type: {req.agent_type}. Falling back to 'chess_coach'")
-            req.agent_type = "chess_coach"
+            logger.error(f"Invalid agent_type: {req.agent_type}")
+            raise HTTPException(status_code=400, detail=f"Invalid agent_type: {req.agent_type}. Must be one of {list(PROMPT_CONFIGS.keys())}")
+
+        # Use the initial_message from the request if provided, else fallback to PROMPT_CONFIGS
+        initial_message = req.lead.get("initial_message", PROMPT_CONFIGS[req.agent_type]["initial_message"]) if req.lead else PROMPT_CONFIGS[req.agent_type]["initial_message"]
+        prompt_preamble = req.lead.get("prompt_preamble", PROMPT_CONFIGS[req.agent_type]["prompt_preamble"]) if req.lead else PROMPT_CONFIGS[req.agent_type]["prompt_preamble"]
+
         # Create dynamic agent_config
         agent_config = CustomLangchainAgentConfig(
             initial_message=BaseMessage(
-                text=PROMPT_CONFIGS[req.agent_type]["initial_message"].replace(
+                text=initial_message.replace(
                     "{{name}}", req.lead.get("name", "there") if req.lead else "there"
                 )
             ),
-            prompt_preamble=PROMPT_CONFIGS[req.agent_type]["prompt_preamble"],
+            prompt_preamble=prompt_preamble,
             model_name="llama-3.1-8b-instant",
             api_key=GROQ_API_KEY,
             provider="groq",
         )
+
         sid = await make_outbound_call(to_phone, req.call_type, req.lead, req.agent_type)
         lead = req.lead or {}
         lead["to_phone"] = to_phone
         lead["agent_type"] = req.agent_type
         lead["agent_config"] = agent_config.dict()  # Store agent_config for the call
+        lead["initial_message"] = initial_message  # Explicitly store initial_message
+        lead["prompt_preamble"] = prompt_preamble  # Explicitly store prompt_preamble
         LEAD_CONTEXT_STORE[sid] = lead
         logger.info(f"Outbound call initiated: SID={sid}, lead={lead}, agent_type={req.agent_type}")
         if req.transcript_callback_url:
@@ -15813,14 +15818,16 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     twilio_base_url = f"https://{BASE_URL}"
     # Validate agent_type
-    agent_type = agent_type if agent_type in PROMPT_CONFIGS else "chess_coach"
-    initial_message = {
-        "qualification": PROMPT_CONFIGS[agent_type]["initial_message"].replace(
-            "{{name}}", lead.get("name", "there") if lead else "there"
-        ),
-        "reminder": f"This is a reminder for your demo on {lead.get('demo_date', time.strftime('%Y-%m-%d %H:%M IST', time.localtime(time.time() + 86400)))}. Ready?",
-        "payment": f"Payment reminder for ₹500 due by {lead.get('due_date', time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400)))}. Settled?"
-    }.get(call_type, PROMPT_CONFIGS[agent_type]["initial_message"])
+    if agent_type not in PROMPT_CONFIGS:
+        logger.error(f"Invalid agent_type: {agent_type}. Falling back to 'chess_coach'")
+        agent_type = "chess_coach"
+    
+    # Use initial_message from lead if provided, else fallback to PROMPT_CONFIGS
+    initial_message = lead.get("initial_message", PROMPT_CONFIGS[agent_type]["initial_message"]) if lead else PROMPT_CONFIGS[agent_type]["initial_message"]
+    initial_message = initial_message.replace(
+        "{{name}}", lead.get("name", "there") if lead else "there"
+    )
+    
     call = await asyncio.get_event_loop().run_in_executor(
         None,
         lambda: client.calls.create(
@@ -15836,7 +15843,14 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
     )
     logger.info(f"Call initiated: SID={call.sid}, type={call_type}, agent_type={agent_type}")
     if call.sid not in LEAD_CONTEXT_STORE:
-        LEAD_CONTEXT_STORE[call.sid] = {"to_phone": to_phone, "call_type": call_type, "agent_type": agent_type, **(lead or {})}
+        LEAD_CONTEXT_STORE[call.sid] = {
+            "to_phone": to_phone,
+            "call_type": call_type,
+            "agent_type": agent_type,
+            "initial_message": initial_message,
+            "prompt_preamble": PROMPT_CONFIGS[agent_type]["prompt_preamble"],
+            **(lead or {})
+        }
     CONVERSATION_STORE.setdefault(call.sid, {
         "conversation_id": call.sid,
         "updated_at": int(time.time()*1000),

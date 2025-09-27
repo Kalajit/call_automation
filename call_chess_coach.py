@@ -15155,14 +15155,15 @@ class ChessEventsManager(events_manager.EventsManager):
 
 
 async def save_recording(conversation_id: str) -> str:
-    # Assume transcriber instance is accessible via a global or passed reference
-    transcriber = None  # Placeholder; should be injected or managed by TelephonyServer
+    # Retrieve transcriber from config_manager or telephony_server
+    transcriber = config_manager.get_transcriber(conversation_id) if config_manager else None
     if transcriber and hasattr(transcriber, 'audio_buffer') and transcriber.conversation_id == conversation_id:
         await transcriber._save_audio()
         audio_path = RECORDINGS_DIR / f"{conversation_id}.wav"
+        logger.info(f"Saved audio to {audio_path}")
         return str(audio_path)
-    logger.error(f"No valid transcriber or buffer for conversation {conversation_id}")
-    return ""
+    logger.error(f"No valid transcriber or buffer for conversation {conversation_id}. Returning empty path.")
+    return ""  # Return empty string as fallback
 
 # Custom Agent Config
 class CustomLangchainAgentConfig(LangchainAgentConfig, type="agent_langchain"):
@@ -15177,21 +15178,22 @@ class CustomLangchainAgent(LangchainAgent):
     def __init__(self, agent_config: CustomLangchainAgentConfig, conversation_id: Optional[str] = None):
         logger.debug(f"Initializing CustomLangchainAgent with config: {agent_config}, conversation_id: {conversation_id}")
         
-        # Initialize with default agent_config
+        # Initialize with default agent_config if provided
         final_agent_config = agent_config
         
-        # Check LEAD_CONTEXT_STORE for conversation-specific config
-        if conversation_id and conversation_id in LEAD_CONTEXT_STORE:
-            lead = LEAD_CONTEXT_STORE[conversation_id]
+        # Check LEAD_CONTEXT_STORE for conversation-specific config using call_sid
+        call_sid = conversation_id  # Twilio passes CallSid as conversation_id
+        if call_sid and call_sid in LEAD_CONTEXT_STORE:
+            lead = LEAD_CONTEXT_STORE[call_sid]
             agent_type = lead.get("agent_type", "default")
-            logger.debug(f"Found LEAD_CONTEXT_STORE for conversation_id {conversation_id}: agent_type={agent_type}")
+            logger.debug(f"Found LEAD_CONTEXT_STORE for call_sid {call_sid}: agent_type={agent_type}")
             
             # Validate agent_type
             if agent_type not in PROMPT_CONFIGS:
                 logger.error(f"Invalid agent_type in LEAD_CONTEXT_STORE: {agent_type}. Falling back to 'default'")
                 agent_type = "default"
             
-            # Use initial_message from lead if provided, else from PROMPT_CONFIGS
+            # Use initial_message and prompt_preamble from lead or PROMPT_CONFIGS
             initial_message_text = lead.get("initial_message", PROMPT_CONFIGS[agent_type]["initial_message"])
             prompt_preamble = lead.get("prompt_preamble", PROMPT_CONFIGS[agent_type]["prompt_preamble"])
             
@@ -15203,21 +15205,19 @@ class CustomLangchainAgent(LangchainAgent):
                     )
                 ),
                 prompt_preamble=prompt_preamble,
-                model_name=agent_config.model_name,
-                api_key=agent_config.api_key,
-                provider=agent_config.provider,
+                model_name=agent_config.model_name if agent_config else "llama-3.1-8b-instant",
+                api_key=agent_config.api_key if agent_config else GROQ_API_KEY,
+                provider=agent_config.provider if agent_config else "groq",
             )
         else:
-            logger.warning(f"No LEAD_CONTEXT_STORE entry for conversation_id {conversation_id}. Using provided agent_config or default.")
-            if not agent_config.initial_message or not agent_config.initial_message.text:
-                logger.error("No valid initial_message in agent_config. Falling back to default.")
-                final_agent_config = CustomLangchainAgentConfig(
-                    initial_message=BaseMessage(text=PROMPT_CONFIGS["default"]["initial_message"]),
-                    prompt_preamble=PROMPT_CONFIGS["default"]["prompt_preamble"],
-                    model_name=agent_config.model_name,
-                    api_key=agent_config.api_key,
-                    provider=agent_config.provider,
-                )
+            logger.warning(f"No LEAD_CONTEXT_STORE entry for call_sid {call_sid}. Using default configuration.")
+            final_agent_config = CustomLangchainAgentConfig(
+                initial_message=BaseMessage(text=PROMPT_CONFIGS["default"]["initial_message"]),
+                prompt_preamble=PROMPT_CONFIGS["default"]["prompt_preamble"],
+                model_name=agent_config.model_name if agent_config else "llama-3.1-8b-instant",
+                api_key=agent_config.api_key if agent_config else GROQ_API_KEY,
+                provider=agent_config.provider if agent_config else "groq",
+            )
         
         logger.debug(f"Final agent_config: initial_message='{final_agent_config.initial_message.text}'")
         super().__init__(agent_config=final_agent_config)
@@ -15226,7 +15226,7 @@ class CustomLangchainAgent(LangchainAgent):
         self.no_input_count = 0
         self.user_name = None
         self.asked_for_name = False
-        self.conversation_id_cache = conversation_id
+        self.conversation_id_cache = call_sid  # Use call_sid consistently
         self.extracted_slots = {}
         self.turns = []
         logger.debug("Initialized CustomLangchainAgent with Groq LLM (llama-3.1-8b-instant)")
@@ -15697,6 +15697,36 @@ agent_config = CustomLangchainAgentConfig(
 
 
 # Telephony Server setup
+# telephony_server = TelephonyServer(
+#     base_url=BASE_URL,  # your ngrok url
+#     config_manager=config_manager,
+#     inbound_call_configs=[
+#         TwilioInboundCallConfig(
+#             url="/inbound_call",
+#             twilio_config=twilio_config,
+#             agent_config=agent_config,
+#             synthesizer_config=synthesizer_config,
+#             transcriber_config=transcriber_config,  # Use instance
+#             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
+# <Response>
+#     <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
+#     <Pause length="15"/>
+#     <Redirect method="POST">/inbound_call</Redirect>
+# </Response>''',
+#             record=True,
+#             status_callback=f"https://{BASE_URL}/call_status",  # NEW: Added for inbound call status
+#             status_callback_method="POST",
+#             status_callback_event=["completed"]  # Trigger on call completion
+#         )
+#     ],
+#     agent_factory=CustomAgentFactory(),
+#     synthesizer_factory=CustomSynthesizerFactory(),
+#     events_manager=ChessEventsManager(),
+# )
+
+
+
+# Telephony Server setup
 telephony_server = TelephonyServer(
     base_url=BASE_URL,  # your ngrok url
     config_manager=config_manager,
@@ -15704,9 +15734,9 @@ telephony_server = TelephonyServer(
         TwilioInboundCallConfig(
             url="/inbound_call",
             twilio_config=twilio_config,
-            agent_config=agent_config,
+            agent_config=None,  # Set to None to defer to dynamic config
             synthesizer_config=synthesizer_config,
-            transcriber_config=transcriber_config,  # Use instance
+            transcriber_config=transcriber_config,
             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
@@ -15714,15 +15744,18 @@ telephony_server = TelephonyServer(
     <Redirect method="POST">/inbound_call</Redirect>
 </Response>''',
             record=True,
-            status_callback=f"https://{BASE_URL}/call_status",  # NEW: Added for inbound call status
+            status_callback=f"https://{BASE_URL}/call_status",
             status_callback_method="POST",
-            status_callback_event=["completed"]  # Trigger on call completion
+            status_callback_event=["completed"]
         )
     ],
     agent_factory=CustomAgentFactory(),
     synthesizer_factory=CustomSynthesizerFactory(),
     events_manager=ChessEventsManager(),
 )
+
+
+
 
 # Add routes to FastAPI app
 app.include_router(telephony_server.get_router())

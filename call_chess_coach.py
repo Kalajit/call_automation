@@ -14454,6 +14454,7 @@ from vocode.streaming.telephony.config_manager.in_memory_config_manager import I
 from vocode.streaming.agent.base_agent import BaseAgent
 from vocode.streaming.models.events import Event, EventType
 from vocode.streaming.models.transcript import TranscriptCompleteEvent
+from langchain_core.runnables import RunnableSequence
 from vocode.streaming.utils import events_manager
 from langchain_groq import ChatGroq
 import threading
@@ -15000,14 +15001,14 @@ sentiment_prompt = PromptTemplate(
     input_variables=["transcript"],
     template="Analyze the sentiment of this transcript: {transcript}. Return a JSON with 'sentiment' (positive, neutral, negative, angry, confused) and 'tone_score' (1-10, 10 being most positive)."
 )
-sentiment_chain = LLMChain(llm=llm, prompt=sentiment_prompt)
+sentiment_chain = RunnableSequence(sentiment_prompt | llm)
 
 # Summary Generation Chain (using Groq LLM)
 summary_prompt = PromptTemplate(
     input_variables=["transcript"],
     template="Generate a summary of this transcript: {transcript}. Include key points, customer intent, and next actions. Return a JSON with 'summary', 'intent', 'next_actions' (array of strings)."
 )
-summary_chain = LLMChain(llm=llm, prompt=summary_prompt)
+summary_chain = RunnableSequence(summary_prompt | llm)
 
 
 
@@ -15178,7 +15179,7 @@ class CustomLangchainAgent(LangchainAgent):
     def __init__(self, agent_config: CustomLangchainAgentConfig, conversation_id: Optional[str] = None):
         logger.debug(f"Initializing CustomLangchainAgent with config: {agent_config}, conversation_id: {conversation_id}")
         
-        # Initialize with default agent_config if provided
+        # Initialize with provided agent_config (default for inbound calls)
         final_agent_config = agent_config
         
         # Check LEAD_CONTEXT_STORE for conversation-specific config using call_sid
@@ -15205,19 +15206,12 @@ class CustomLangchainAgent(LangchainAgent):
                     )
                 ),
                 prompt_preamble=prompt_preamble,
-                model_name=agent_config.model_name if agent_config else "llama-3.1-8b-instant",
-                api_key=agent_config.api_key if agent_config else GROQ_API_KEY,
-                provider=agent_config.provider if agent_config else "groq",
+                model_name=agent_config.model_name,
+                api_key=agent_config.api_key,
+                provider=agent_config.provider,
             )
         else:
-            logger.warning(f"No LEAD_CONTEXT_STORE entry for call_sid {call_sid}. Using default configuration.")
-            final_agent_config = CustomLangchainAgentConfig(
-                initial_message=BaseMessage(text=PROMPT_CONFIGS["default"]["initial_message"]),
-                prompt_preamble=PROMPT_CONFIGS["default"]["prompt_preamble"],
-                model_name=agent_config.model_name if agent_config else "llama-3.1-8b-instant",
-                api_key=agent_config.api_key if agent_config else GROQ_API_KEY,
-                provider=agent_config.provider if agent_config else "groq",
-            )
+            logger.warning(f"No LEAD_CONTEXT_STORE entry for call_sid {call_sid}. Using provided agent_config.")
         
         logger.debug(f"Final agent_config: initial_message='{final_agent_config.initial_message.text}'")
         super().__init__(agent_config=final_agent_config)
@@ -15684,11 +15678,9 @@ transcriber_config = DeepgramTranscriberConfig(
     downsampling=1,
 )
 
-agent_config = CustomLangchainAgentConfig(
-    initial_message=BaseMessage(
-        text=PROMPT_CONFIGS["chess_coach"]["initial_message"].replace("{{name}}", "there")
-    ),
-    prompt_preamble=PROMPT_CONFIGS["chess_coach"]["prompt_preamble"],
+default_agent_config = CustomLangchainAgentConfig(
+    initial_message=BaseMessage(text=PROMPT_CONFIGS["default"]["initial_message"]),
+    prompt_preamble=PROMPT_CONFIGS["default"]["prompt_preamble"],
     model_name="llama-3.1-8b-instant",
     api_key=GROQ_API_KEY,
     provider="groq",
@@ -15728,13 +15720,13 @@ agent_config = CustomLangchainAgentConfig(
 
 # Telephony Server setup
 telephony_server = TelephonyServer(
-    base_url=BASE_URL,  # your ngrok url
+    base_url=BASE_URL,  # your render url
     config_manager=config_manager,
     inbound_call_configs=[
         TwilioInboundCallConfig(
             url="/inbound_call",
             twilio_config=twilio_config,
-            agent_config=None,  # Set to None to defer to dynamic config
+            agent_config=default_agent_config,  # Use default config to satisfy pydantic
             synthesizer_config=synthesizer_config,
             transcriber_config=transcriber_config,
             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>

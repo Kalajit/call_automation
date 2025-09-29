@@ -17630,27 +17630,59 @@ default_agent_config = CustomLangchainAgentConfig(
 
 
 # Telephony Server setup
+# telephony_server = TelephonyServer(
+#     base_url=BASE_URL,  # your render url
+#     config_manager=config_manager,
+#     inbound_call_configs=[
+#         TwilioInboundCallConfig(
+#             url="/inbound_call",
+#             twilio_config=twilio_config,
+#             agent_config=default_agent_config,  # Use default config to satisfy pydantic
+#             synthesizer_config=synthesizer_config,
+#             transcriber_config=transcriber_config,
+#             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
+# <Response>
+#     <Say voice="Polly.Matthew">I didn't hear a response. Are you still there? Please say something to continue.</Say>
+#     <Pause length="15"/>
+#     <Redirect method="POST">/inbound_call</Redirect>
+# </Response>''',
+#             record=True,
+#             status_callback=f"https://{BASE_URL}/call_status",
+#             status_callback_method="POST",
+#             status_callback_event=["completed"],
+#             conversation_class=CustomTwilioPhoneConversation,  # Use custom conversation class
+#         )
+#     ],
+#     agent_factory=CustomAgentFactory(),
+#     synthesizer_factory=CustomSynthesizerFactory(),
+#     events_manager=ChessEventsManager(),
+# )
+
+
+
+
+
 telephony_server = TelephonyServer(
-    base_url=BASE_URL,  # your render url
+    base_url=BASE_URL,
     config_manager=config_manager,
     inbound_call_configs=[
         TwilioInboundCallConfig(
-            url="/inbound_call",
+            url="/connect_call",
             twilio_config=twilio_config,
-            agent_config=default_agent_config,  # Use default config to satisfy pydantic
+            agent_config=default_agent_config,
             synthesizer_config=synthesizer_config,
             transcriber_config=transcriber_config,
             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="Polly.Matthew">I didn't hear a response. Are you still there? Please say something to continue.</Say>
-    <Pause length="15"/>
-    <Redirect method="POST">/inbound_call</Redirect>
+    <Pause length="5"/>
+    <Hangup/>
 </Response>''',
             record=True,
             status_callback=f"https://{BASE_URL}/call_status",
             status_callback_method="POST",
             status_callback_event=["completed"],
-            conversation_class=CustomTwilioPhoneConversation,  # Use custom conversation class
+            conversation_class=CustomTwilioPhoneConversation,
         )
     ],
     agent_factory=CustomAgentFactory(),
@@ -17731,14 +17763,12 @@ async def outbound_call(req: OutboundCallRequest):
         lead = req.lead or {}
         lead["to_phone"] = to_phone
         lead["prompt_config_key"] = req.prompt_config_key
-        # Set defaults if not provided
         if "initial_message" not in lead:
             lead["initial_message"] = PROMPT_CONFIGS[req.prompt_config_key]["initial_message"].replace(
                 "{{name}}", lead.get("name", "there")
             )
         if "prompt_preamble" not in lead:
             lead["prompt_preamble"] = PROMPT_CONFIGS[req.prompt_config_key]["prompt_preamble"]
-        # Validate lead fields
         for key in ["name", "email", "phone_number", "role"]:
             if key in lead and not isinstance(lead[key], str):
                 logger.warning(f"Invalid {key} in lead: {lead[key]}. Converting to string.")
@@ -17775,7 +17805,7 @@ async def health_check():
 # Outbound call helper
 async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, prompt_config_key: str = "default"):
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    twilio_base_url = f"https://{BASE_URL}"
+    twilio_base_url = BASE_URL  # Removed redundant https://
     if not to_phone or not re.match(r"^\+\d{10,15}$", to_phone):
         logger.error(f"Invalid phone number format: {to_phone}")
         raise HTTPException(status_code=400, detail="Invalid phone number format. Must be in E.164 format (e.g., +1234567890).")
@@ -17796,7 +17826,7 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
             "lead_id": lead.get("lead_id", str(uuid.uuid4()))
         }
         query_params = urllib.parse.urlencode({k: v for k, v in lead_data.items() if v}, safe=":")
-        call_url = f"{twilio_base_url}/inbound_call?{query_params}"
+        call_url = f"{twilio_base_url}/connect_call?{query_params}"
         if len(call_url) > 4000:
             logger.error(f"Generated URL exceeds 4000 characters: {len(call_url)}")
             raise HTTPException(status_code=400, detail="Generated URL exceeds Twilio's 4000-character limit")
@@ -17815,13 +17845,17 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
         )
         logger.info(f"Call initiated: SID={call.sid}, type={call_type}, prompt_config_key={prompt_config_key}")
         async with CONVERSATION_LOCK:
-            CONVERSATION_STORE[call.sid] = {
-                "conversation_id": call.sid,
-                "updated_at": int(time.time() * 1000),
-                "lead": lead_data,
-                "slots": {},
-                "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time() * 1000)}]
-            }
+            if call.sid in CONVERSATION_STORE:
+                logger.warning(f"Call SID {call.sid} already exists in CONVERSATION_STORE. Updating lead data.")
+                CONVERSATION_STORE[call.sid]["lead"].update(lead_data)
+            else:
+                CONVERSATION_STORE[call.sid] = {
+                    "conversation_id": call.sid,
+                    "updated_at": int(time.time() * 1000),
+                    "lead": lead_data,
+                    "slots": {},
+                    "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time() * 1000)}]
+                }
         return call.sid
     except TwilioRestException as e:
         logger.error(f"Twilio error in make_outbound_call: {str(e)}")
@@ -17829,25 +17863,95 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
     except Exception as e:
         logger.error(f"Unexpected error in make_outbound_call: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
-    
 
 
 
 
-@app.post("/inbound_call")
-async def inbound_call(request: Request):
+# @app.post("/inbound_call")
+# async def inbound_call(request: Request):
+#     try:
+#         data = await request.form()
+#         call_sid = data.get("CallSid")
+#         from_phone = data.get("From")
+#         to_phone = data.get("To")
+#         logger.debug(f"Inbound call received: CallSid={call_sid}, From={from_phone}, To={to_phone}")
+#         if not call_sid:
+#             logger.error("No CallSid provided in inbound call request")
+#             return Response(
+#                 content='''<?xml version="1.0" encoding="UTF-8"?>
+# <Response>
+#     <Say voice="Polly.Matthew">Error: No call ID provided. Please try again.</Say>
+#     <Hangup/>
+# </Response>''',
+#                 media_type="application/xml"
+#             )
+#         query_params = request.query_params
+#         prompt_config_key = query_params.get("prompt_config_key", "default")
+#         if prompt_config_key not in PROMPT_CONFIGS:
+#             logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Using default.")
+#             prompt_config_key = "default"
+#         lead = {
+#             "prompt_config_key": prompt_config_key,
+#             "prompt_preamble": PROMPT_CONFIGS[prompt_config_key]["prompt_preamble"],
+#             "initial_message": PROMPT_CONFIGS[prompt_config_key]["initial_message"],
+#             "to_phone": to_phone,
+#             "from_phone": from_phone,
+#             "name": query_params.get("name", ""),
+#             "email": query_params.get("email", ""),
+#             "phone_number": query_params.get("phone_number", ""),
+#             "role": query_params.get("role", ""),
+#             "lead_id": query_params.get("lead_id", call_sid)
+#         }
+#         lead["initial_message"] = lead["initial_message"].replace(
+#             "{{name}}", lead.get("name", "there")
+#         )
+#         async with CONVERSATION_LOCK:
+#             CONVERSATION_STORE[call_sid] = {
+#                 "conversation_id": call_sid,
+#                 "updated_at": int(time.time() * 1000),
+#                 "lead": lead,
+#                 "slots": {},
+#                 "turns": [{"speaker": "bot", "text": lead["initial_message"], "ts": int(time.time() * 1000)}]
+#             }
+#         logger.debug(f"Reconstructed and stored lead data: {lead}")
+#         twiml = await telephony_server.handle_inbound_call(
+#             call_sid=call_sid,
+#             from_phone=from_phone,
+#             to_phone=to_phone,
+#             base_url=BASE_URL,
+#             lead=lead
+#         )
+#         logger.debug(f"Returning TwiML: {twiml}")
+#         return Response(content=twiml, media_type="application/xml")
+#     except Exception as e:
+#         logger.error(f"Error in inbound_call: {str(e)}")
+#         return Response(
+#             content='''<?xml version="1.0" encoding="UTF-8"?>
+# <Response>
+#     <Say voice="Polly.Matthew">An error occurred. Please try again later.</Say>
+#     <Hangup/>
+# </Response>''',
+#             media_type="application/xml"
+#         )
+
+
+
+
+# NEW: Consolidated endpoint for both inbound and outbound calls
+@app.post("/connect_call")
+async def connect_call(request: Request):
     try:
         data = await request.form()
         call_sid = data.get("CallSid")
         from_phone = data.get("From")
         to_phone = data.get("To")
-        logger.debug(f"Inbound call received: CallSid={call_sid}, From={from_phone}, To={to_phone}")
-        if not call_sid:
-            logger.error("No CallSid provided in inbound call request")
+        logger.debug(f"Call received: CallSid={call_sid}, From={from_phone}, To={to_phone}")
+        if not call_sid or not from_phone or not to_phone:
+            logger.error(f"Missing required fields: CallSid={call_sid}, From={from_phone}, To={to_phone}")
             return Response(
                 content='''<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="Polly.Matthew">Error: No call ID provided. Please try again.</Say>
+    <Say voice="Polly.Matthew">Error: Missing call information. Please try again.</Say>
     <Hangup/>
 </Response>''',
                 media_type="application/xml"
@@ -17857,30 +17961,42 @@ async def inbound_call(request: Request):
         if prompt_config_key not in PROMPT_CONFIGS:
             logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Using default.")
             prompt_config_key = "default"
-        lead = {
-            "prompt_config_key": prompt_config_key,
-            "prompt_preamble": PROMPT_CONFIGS[prompt_config_key]["prompt_preamble"],
-            "initial_message": PROMPT_CONFIGS[prompt_config_key]["initial_message"],
-            "to_phone": to_phone,
-            "from_phone": from_phone,
-            "name": query_params.get("name", ""),
-            "email": query_params.get("email", ""),
-            "phone_number": query_params.get("phone_number", ""),
-            "role": query_params.get("role", ""),
-            "lead_id": query_params.get("lead_id", call_sid)
-        }
-        lead["initial_message"] = lead["initial_message"].replace(
-            "{{name}}", lead.get("name", "there")
-        )
         async with CONVERSATION_LOCK:
-            CONVERSATION_STORE[call_sid] = {
-                "conversation_id": call_sid,
-                "updated_at": int(time.time() * 1000),
-                "lead": lead,
-                "slots": {},
-                "turns": [{"speaker": "bot", "text": lead["initial_message"], "ts": int(time.time() * 1000)}]
-            }
-        logger.debug(f"Reconstructed and stored lead data: {lead}")
+            existing_convo = CONVERSATION_STORE.get(call_sid)
+            if existing_convo and existing_convo.get("lead"):
+                lead = existing_convo["lead"]
+                logger.debug(f"Retrieved existing lead for call_sid {call_sid}: {lead}")
+                # Update only missing fields from query params
+                lead.update({
+                    "name": lead.get("name", query_params.get("name", "")),
+                    "email": lead.get("email", query_params.get("email", "")),
+                    "phone_number": lead.get("phone_number", query_params.get("phone_number", "")),
+                    "role": lead.get("role", query_params.get("role", ""))
+                })
+            else:
+                lead = {
+                    "prompt_config_key": prompt_config_key,
+                    "prompt_preamble": PROMPT_CONFIGS[prompt_config_key]["prompt_preamble"],
+                    "initial_message": PROMPT_CONFIGS[prompt_config_key]["initial_message"],
+                    "to_phone": to_phone,
+                    "from_phone": from_phone,
+                    "name": query_params.get("name", ""),
+                    "email": query_params.get("email", ""),
+                    "phone_number": query_params.get("phone_number", ""),
+                    "role": query_params.get("role", ""),
+                    "lead_id": query_params.get("lead_id", call_sid)
+                }
+                lead["initial_message"] = lead["initial_message"].replace(
+                    "{{name}}", lead.get("name", "there")
+                )
+                CONVERSATION_STORE[call_sid] = {
+                    "conversation_id": call_sid,
+                    "updated_at": int(time.time() * 1000),
+                    "lead": lead,
+                    "slots": {},
+                    "turns": [{"speaker": "bot", "text": lead["initial_message"], "ts": int(time.time() * 1000)}]
+                }
+                logger.debug(f"Created new lead for call_sid {call_sid}: {lead}")
         twiml = await telephony_server.handle_inbound_call(
             call_sid=call_sid,
             from_phone=from_phone,
@@ -17891,7 +18007,7 @@ async def inbound_call(request: Request):
         logger.debug(f"Returning TwiML: {twiml}")
         return Response(content=twiml, media_type="application/xml")
     except Exception as e:
-        logger.error(f"Error in inbound_call: {str(e)}")
+        logger.error(f"Error in connect_call: {str(e)}")
         return Response(
             content='''<?xml version="1.0" encoding="UTF-8"?>
 <Response>

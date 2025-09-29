@@ -16733,6 +16733,8 @@ LEAD_CONTEXT_STORE: dict = {}  # ADDED n8n
 CONVERSATION_LOCK = asyncio.Lock()
 
 
+TRANSCRIBER_REGISTRY: dict = {}
+
 # Sentiment Analysis Chain (using Groq LLM)
 sentiment_prompt = PromptTemplate(
     input_variables=["transcript"],
@@ -16898,8 +16900,7 @@ TRANSCRIBER_REGISTRY: dict = {}  # Store transcribers by conversation_id
 
 
 async def save_recording(conversation_id: str) -> str:
-    # Retrieve transcriber from config_manager or telephony_server
-    transcriber = config_manager.get_transcriber(conversation_id) if config_manager else None
+    transcriber = TRANSCRIBER_REGISTRY.get(conversation_id)
     if transcriber and hasattr(transcriber, 'audio_buffer') and transcriber.conversation_id == conversation_id:
         await transcriber._save_audio()
         audio_path = RECORDINGS_DIR / f"{conversation_id}.wav"
@@ -17366,10 +17367,10 @@ class CustomTwilioPhoneConversation(TwilioPhoneConversation):
             self.agent = CustomAgentFactory().create_agent(
                 agent_config=agent_config,
                 conversation_id=call_sid,
-                lead=self.lead
+                lead=self.lead  # FIXED: Pass self.lead to create_agent
             )
             logger.debug(f"Created agent with conversation_id: {self.conversation_id}, lead: {self.lead}")
-            # FIXED: Register transcriber
+            # Register transcriber
             if self.transcriber:
                 TRANSCRIBER_REGISTRY[self.conversation_id] = self.transcriber
                 self.transcriber.set_conversation_id(self.conversation_id)
@@ -17634,13 +17635,15 @@ app.include_router(telephony_server.get_router())
 @app.post("/call_status")
 async def call_status(request: Request):
     try:
+        raw_body = await request.body()
+        logger.debug(f"Raw call_status body: {raw_body}")
         data = await request.json()
         call_sid = data.get("CallSid")
         if data.get("CallStatus") == "completed":
             logger.info(f"Inbound call {call_sid} completed")
         return {"ok": True}
     except json.JSONDecodeError:
-        logger.warning("Received non-JSON data in call_status callback")
+        logger.warning(f"Received non-JSON data in call_status callback: {raw_body.decode('utf-8', errors='ignore')}")
         return {"ok": True}
     except Exception as e:
         logger.error(f"Error in call_status: {e}")

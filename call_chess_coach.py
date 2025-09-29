@@ -16217,6 +16217,7 @@ from vocode.streaming.utils.events_manager import EventsManager
 # from vocode.streaming.output_device.twilio_output_device import ChunkFinishedMarkMessage
 import base64
 import urllib.parse
+import uuid
 
 
 
@@ -16840,10 +16841,14 @@ class ChessEventsManager(events_manager.EventsManager):
             logger.debug(f"Transcript for conversation {transcript_complete_event.conversation_id}: {transcript}")
 
             try:
-                # Sentiment Analysis
+                # Sentiment Analysis with fallback
                 sentiment_response = await sentiment_chain.ainvoke({"transcript": transcript})
-                sentiment = json.loads(sentiment_response.content)
-                logger.debug(f"Sentiment analysis: {sentiment}")
+                try:
+                    sentiment = json.loads(sentiment_response.content)
+                    logger.debug(f"Sentiment analysis: {sentiment}")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse LLM sentiment response: {str(e)}. Using fallback.")
+                    sentiment = {"sentiment": "unknown", "tone_score": 5}
 
                 # Summary Generation
                 summary_response = await summary_chain.ainvoke({"transcript": transcript})
@@ -16897,10 +16902,11 @@ class ChessEventsManager(events_manager.EventsManager):
                         with open(out_path, "w", encoding="utf-8") as f:
                             json.dump(convo, f, ensure_ascii=False, indent=2)
                         logger.info(f"Wrote JSON summary to {out_path}")
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse LLM response: {str(e)}")
             except Exception as e:
                 logger.error(f"CRM update failed in handle_event: {str(e)}")
+
+
+
 
 # Transcriber Registry
 TRANSCRIBER_REGISTRY: dict = {}  # Store transcribers by conversation_id
@@ -17345,7 +17351,7 @@ class CustomTwilioPhoneConversation(TwilioPhoneConversation):
         )
         self.twilio_sid = twilio_sid
         self.conversation_id = conversation_id or twilio_sid
-        self.lead = lead  # Ensure lead is stored
+        self.lead = lead or {} # Ensure lead is stored
         logger.debug(f"CustomTwilioPhoneConversation initialized with twilio_sid: {twilio_sid}, conversation_id: {self.conversation_id}, lead: {lead}")
 
     async def attach_ws_and_start(self, ws: WebSocket, call_sid: Optional[str] = None):
@@ -17356,30 +17362,41 @@ class CustomTwilioPhoneConversation(TwilioPhoneConversation):
             else:
                 self.conversation_id = self.conversation_id or str(uuid.uuid4())
                 logger.debug(f"Generated conversation_id: {self.conversation_id}")
-            
-            # Retrieve lead from CONVERSATION_STORE if not set
-            if not self.lead and self.conversation_id in CONVERSATION_STORE:
-                self.lead = CONVERSATION_STORE[self.conversation_id].get("lead", {})
-                logger.debug(f"Retrieved lead from CONVERSATION_STORE: {self.lead}")
 
-            agent_config = self.agent_config
-            if self.lead and "prompt_config_key" in self.lead:
-                prompt_config_key = self.lead.get("prompt_config_key", "default")
-                if prompt_config_key not in PROMPT_CONFIGS:
-                    logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Using default.")
-                    prompt_config_key = "default"
-                agent_config = CustomLangchainAgentConfig(
-                    initial_message=BaseMessage(
-                        text=self.lead.get("initial_message", PROMPT_CONFIGS[prompt_config_key]["initial_message"]).replace(
-                            "{{name}}", self.lead.get("name", "there")
-                        )
-                    ),
-                    prompt_preamble=self.lead.get("prompt_preamble", PROMPT_CONFIGS[prompt_config_key]["prompt_preamble"]),
-                    model_name=self.agent_config.model_name,
-                    api_key=self.agent_config.api_key,
-                    provider=self.agent_config.provider,
-                )
-                logger.debug(f"Updated agent_config with lead: initial_message='{agent_config.initial_message.text}', prompt_config_key={prompt_config_key}")
+            # Retrieve or initialize lead data in CONVERSATION_STORE
+            async with CONVERSATION_LOCK:
+                if self.conversation_id in CONVERSATION_STORE:
+                    self.lead = CONVERSATION_STORE[self.conversation_id].get("lead", {})
+                    logger.debug(f"Retrieved lead from CONVERSATION_STORE: {self.lead}")
+                else:
+                    CONVERSATION_STORE[self.conversation_id] = {
+                        "conversation_id": self.conversation_id,
+                        "updated_at": int(time.time() * 1000),
+                        "lead": self.lead,
+                        "slots": {},
+                        "turns": []
+                    }
+                    logger.debug(f"Initialized CONVERSATION_STORE for conversation_id: {self.conversation_id}")
+
+            # Set agent configuration
+            prompt_config_key = self.lead.get("prompt_config_key", "default")
+            if prompt_config_key not in PROMPT_CONFIGS:
+                logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Using default.")
+                prompt_config_key = "default"
+
+            initial_message = self.lead.get("initial_message", PROMPT_CONFIGS[prompt_config_key]["initial_message"]).replace(
+                "{{name}}", self.lead.get("name", "there")
+            )
+            prompt_preamble = self.lead.get("prompt_preamble", PROMPT_CONFIGS[prompt_config_key]["prompt_preamble"])
+
+            agent_config = CustomLangchainAgentConfig(
+                initial_message=BaseMessage(text=initial_message),
+                prompt_preamble=prompt_preamble,
+                model_name=self.agent_config.model_name,
+                api_key=self.agent_config.api_key,
+                provider=self.agent_config.provider,
+            )
+            logger.debug(f"Updated agent_config: initial_message='{agent_config.initial_message.text}', prompt_config_key={prompt_config_key}")
 
             self.agent = CustomAgentFactory().create_agent(
                 agent_config=agent_config,
@@ -17422,9 +17439,6 @@ class CustomTwilioPhoneConversation(TwilioPhoneConversation):
             await ws.close(code=1011, reason=f"Error: {str(e)}")
             await self.terminate()
 
-
-            
-
     async def _handle_ws_message(self, message: str) -> Optional[TwilioPhoneConversationWebsocketAction]:
         try:
             if not message:
@@ -17445,7 +17459,7 @@ class CustomTwilioPhoneConversation(TwilioPhoneConversation):
             return None
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in WebSocket message: {str(e)}, message: {message}")
-            return None  # FIXED: Explicitly return None
+            return None
         except Exception as e:
             logger.error(f"Error processing WebSocket message: {str(e)}")
             return None
@@ -17668,7 +17682,7 @@ async def call_status(request: Request):
         return {"ok": False}
     
 
-    
+
 
 
 # NEW: Endpoint to serve conversation JSON files
@@ -17717,21 +17731,27 @@ async def outbound_call(req: OutboundCallRequest):
         lead = req.lead or {}
         lead["to_phone"] = to_phone
         lead["prompt_config_key"] = req.prompt_config_key
-        # FIXED: Only set defaults if not provided
+        # Set defaults if not provided
         if "initial_message" not in lead:
             lead["initial_message"] = PROMPT_CONFIGS[req.prompt_config_key]["initial_message"].replace(
                 "{{name}}", lead.get("name", "there")
             )
         if "prompt_preamble" not in lead:
             lead["prompt_preamble"] = PROMPT_CONFIGS[req.prompt_config_key]["prompt_preamble"]
-        # FIXED: Validate lead fields
+        # Validate lead fields
         for key in ["name", "email", "phone_number", "role"]:
             if key in lead and not isinstance(lead[key], str):
                 logger.warning(f"Invalid {key} in lead: {lead[key]}. Converting to string.")
                 lead[key] = str(lead[key])
         sid = await make_outbound_call(to_phone, req.call_type, lead, req.prompt_config_key)
-        async with CONVERSATION_LOCK:  # FIXED: Lock CONVERSATION_STORE
-            LEAD_CONTEXT_STORE[sid] = lead
+        async with CONVERSATION_LOCK:
+            CONVERSATION_STORE[sid] = {
+                "conversation_id": sid,
+                "updated_at": int(time.time() * 1000),
+                "lead": lead,
+                "slots": {},
+                "turns": [{"speaker": "bot", "text": lead["initial_message"], "ts": int(time.time() * 1000)}]
+            }
         logger.info(f"Outbound call initiated: SID={sid}, lead={lead}, prompt_config_key={req.prompt_config_key}")
         if req.transcript_callback_url:
             os.environ["TRANSCRIPT_CALLBACK_URL"] = req.transcript_callback_url
@@ -17744,7 +17764,6 @@ async def outbound_call(req: OutboundCallRequest):
     except Exception as e:
         logger.error(f"/outbound_call failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
-
 
 
 @app.get("/health")
@@ -17770,10 +17789,11 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
     try:
         lead_data = {
             "prompt_config_key": prompt_config_key,
-            "name": lead.get("name", "") if lead else "",
-            "email": lead.get("email", "") if lead else "",
-            "phone_number": lead.get("phone_number", "") if lead else "",
-            "role": lead.get("role", "") if lead else ""
+            "name": lead.get("name", ""),
+            "email": lead.get("email", ""),
+            "phone_number": lead.get("phone_number", ""),
+            "role": lead.get("role", ""),
+            "lead_id": lead.get("lead_id", str(uuid.uuid4()))
         }
         query_params = urllib.parse.urlencode({k: v for k, v in lead_data.items() if v}, safe=":")
         call_url = f"{twilio_base_url}/inbound_call?{query_params}"
@@ -17794,18 +17814,11 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
             )
         )
         logger.info(f"Call initiated: SID={call.sid}, type={call_type}, prompt_config_key={prompt_config_key}")
-        full_lead_data = lead or {}
-        full_lead_data.update({
-            "prompt_config_key": prompt_config_key,
-            "initial_message": initial_message,
-            "prompt_preamble": PROMPT_CONFIGS[prompt_config_key]["prompt_preamble"],
-            "to_phone": to_phone
-        })
-        async with CONVERSATION_LOCK:  # FIXED: Lock CONVERSATION_STORE
+        async with CONVERSATION_LOCK:
             CONVERSATION_STORE[call.sid] = {
                 "conversation_id": call.sid,
                 "updated_at": int(time.time() * 1000),
-                "lead": full_lead_data,
+                "lead": lead_data,
                 "slots": {},
                 "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time() * 1000)}]
             }
@@ -17854,12 +17867,20 @@ async def inbound_call(request: Request):
             "email": query_params.get("email", ""),
             "phone_number": query_params.get("phone_number", ""),
             "role": query_params.get("role", ""),
-            "lead_id": query_params.get("lead_id", call_sid)  # FIXED: Include lead_id
+            "lead_id": query_params.get("lead_id", call_sid)
         }
         lead["initial_message"] = lead["initial_message"].replace(
             "{{name}}", lead.get("name", "there")
         )
-        logger.debug(f"Reconstructed lead data: {lead}")
+        async with CONVERSATION_LOCK:
+            CONVERSATION_STORE[call_sid] = {
+                "conversation_id": call_sid,
+                "updated_at": int(time.time() * 1000),
+                "lead": lead,
+                "slots": {},
+                "turns": [{"speaker": "bot", "text": lead["initial_message"], "ts": int(time.time() * 1000)}]
+            }
+        logger.debug(f"Reconstructed and stored lead data: {lead}")
         twiml = await telephony_server.handle_inbound_call(
             call_sid=call_sid,
             from_phone=from_phone,

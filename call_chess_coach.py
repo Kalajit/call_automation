@@ -14494,6 +14494,8 @@ from vocode.streaming.transcriber.abstract_factory import AbstractTranscriberFac
 from vocode.streaming.synthesizer.abstract_factory import AbstractSynthesizerFactory
 from vocode.streaming.models.transcriber import TranscriberConfig
 from vocode.streaming.utils.events_manager import EventsManager
+# from vocode.streaming.output_device.twilio_output_device import ChunkFinishedMarkMessage
+import base64
 
 
 # Configure logging
@@ -15610,26 +15612,63 @@ class CustomTwilioPhoneConversation(TwilioPhoneConversation):
         logger.debug(f"CustomTwilioPhoneConversation initialized with twilio_sid: {twilio_sid}, conversation_id: {conversation_id}")
 
     async def attach_ws_and_start(self, ws: WebSocket, call_sid: Optional[str] = None):
-        if call_sid and not self.conversation_id:
-            self.conversation_id = call_sid
-            logger.debug(f"Set conversation_id to call_sid: {call_sid}")
-        super().attach_ws(ws)
-        await self._wait_for_twilio_start(ws)
-        await self.start()
-        self.events_manager.publish_event(
-            PhoneCallConnectedEvent(
-                conversation_id=self.id,
-                to_phone_number=self.to_phone,
-                from_phone_number=self.from_phone,
+        try:
+            if call_sid and not self.conversation_id:
+                self.conversation_id = call_sid
+                logger.debug(f"Set conversation_id to call_sid: {call_sid}")
+            super().attach_ws(ws)
+            await self._wait_for_twilio_start(ws)
+            await self.start()
+            self.events_manager.publish_event(
+                PhoneCallConnectedEvent(
+                    conversation_id=self.id,
+                    to_phone_number=self.to_phone,
+                    from_phone_number=self.from_phone,
+                )
             )
-        )
-        while self.is_active():
-            message = await ws.receive_text()
-            response = await self._handle_ws_message(message)
-            if response == TwilioPhoneConversationWebsocketAction.CLOSE_WEBSOCKET:
-                break
-        await ws.close(code=1000, reason=None)
-        await self.terminate()
+            while self.is_active():
+                try:
+                    message = await ws.receive_text()
+                    logger.debug(f"Received WebSocket message: {message}")
+                    response = await self._handle_ws_message(message)
+                    if response == TwilioPhoneConversationWebsocketAction.CLOSE_WEBSOCKET:
+                        logger.debug("Received CLOSE_WEBSOCKET action; terminating call")
+                        break
+                except Exception as e:
+                    logger.error(f"Error handling WebSocket message: {str(e)}")
+                    # Continue to keep WebSocket open instead of closing
+                    continue
+            await ws.close(code=1000, reason="Normal closure")
+            await self.terminate()
+        except Exception as e:
+            logger.error(f"Error in attach_ws_and_start: {str(e)}")
+            await ws.close(code=1011, reason=f"Error: {str(e)}")
+            await self.terminate()
+
+    async def _handle_ws_message(self, message: str) -> Optional[TwilioPhoneConversationWebsocketAction]:
+        try:
+            if not message:
+                logger.warning("Received empty WebSocket message")
+                return None
+            data = json.loads(message)
+            logger.debug(f"Parsed WebSocket message: {data}")
+            if data.get("event") == "media":
+                media = data.get("media", {})
+                chunk = base64.b64decode(media.get("payload", ""))
+                self.receive_audio(chunk)
+            elif data.get("event") == "mark":
+                chunk_id = data.get("mark", {}).get("name", "")
+                logger.debug(f"Received mark event with chunk_id: {chunk_id}")
+            elif data.get("event") == "stop":
+                logger.debug("Received 'stop' event; closing WebSocket")
+                return TwilioPhoneConversationWebsocketAction.CLOSE_WEBSOCKET
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in WebSocket message: {str(e)}, message: {message}")
+            return None
+        except Exception as e:
+            logger.error(f"Error processing WebSocket message: {str(e)}")
+            return None
 
 
 
@@ -15809,7 +15848,7 @@ telephony_server = TelephonyServer(
             transcriber_config=transcriber_config,
             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
+    <Say voice="Polly.Matthew">I didn't hear a response. Are you still there? Please say something to continue.</Say>
     <Pause length="15"/>
     <Redirect method="POST">/inbound_call</Redirect>
 </Response>''',
@@ -16002,11 +16041,22 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
 @app.post("/inbound_call")
 async def inbound_call(request: Request):
     try:
-        data = await request.form()  # Twilio sends form data
+        data = await request.form()
         call_sid = data.get("CallSid")
         from_phone = data.get("From")
         to_phone = data.get("To")
         logger.debug(f"Inbound call received: CallSid={call_sid}, From={from_phone}, To={to_phone}")
+        
+        if not call_sid:
+            logger.error("No CallSid provided in inbound call request")
+            return Response(
+                content='''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Matthew">Error: No call ID provided. Please try again.</Say>
+    <Hangup/>
+</Response>''',
+                media_type="application/xml"
+            )
         
         if call_sid in LEAD_CONTEXT_STORE:
             logger.debug(f"Found lead context for CallSid={call_sid}: {LEAD_CONTEXT_STORE[call_sid]}")
@@ -16026,11 +16076,18 @@ async def inbound_call(request: Request):
             to_phone=to_phone,
             base_url=BASE_URL
         )
+        logger.debug(f"Returning TwiML: {twiml}")
         return Response(content=twiml, media_type="application/xml")
     except Exception as e:
         logger.error(f"Error in inbound_call: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to handle inbound call: {str(e)}")
-
+        return Response(
+            content='''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Matthew">An error occurred. Please try again later.</Say>
+    <Hangup/>
+</Response>''',
+            media_type="application/xml"
+        )
 
 
 

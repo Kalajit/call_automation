@@ -17714,23 +17714,22 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
         lead_data["initial_message"] = initial_message
         lead_data["prompt_preamble"] = PROMPT_CONFIGS[prompt_config_key]["prompt_preamble"]
         
-        # Encode lead data as JSON string for Twilio custom parameters
-        twilio_params = {
-            "lead_data": json.dumps(lead_data)
-        }
+        # Encode lead_data as a URL query parameter
+        import urllib.parse
+        lead_data_encoded = urllib.parse.urlencode({"lead_data": json.dumps(lead_data)})
+        call_url = f"{twilio_base_url}/inbound_call?{lead_data_encoded}"
 
         call = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: client.calls.create(
                 to=to_phone,
                 from_=TWILIO_PHONE_NUMBER,
-                url=f"{twilio_base_url}/inbound_call",
+                url=call_url,
                 status_callback=f"{twilio_base_url}/call_status",
                 status_callback_method="POST",
                 status_callback_event=["initiated", "ringing", "answered", "completed"],
                 record=True,
-                recording_channels="dual",
-                twiml_custom_params=twilio_params
+                recording_channels="dual"
             )
         )
 
@@ -17752,6 +17751,10 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
     except Exception as e:
         logger.error(f"Unexpected error in make_outbound_call: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+    
+
+
+
 
 @app.post("/inbound_call")
 async def inbound_call(request: Request):
@@ -17773,8 +17776,9 @@ async def inbound_call(request: Request):
                 media_type="application/xml"
             )
         
-        # Extract lead data from Twilio custom parameters
-        lead_data_str = data.get("lead_data")
+        # Extract lead_data from query parameters
+        query_params = request.query_params
+        lead_data_str = query_params.get("lead_data")
         lead = {}
         if lead_data_str:
             try:

@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY requirements.txt .
+RUN ls -l requirements.txt || (echo "requirements.txt not found" && exit 1)
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .

@@ -15578,9 +15578,9 @@ class CustomTwilioPhoneConversation(TwilioPhoneConversation):
         transcriber_config: TranscriberConfig,
         synthesizer_config: SynthesizerConfig,
         twilio_sid: str,
-        agent_factory: AbstractAgentFactory,
-        transcriber_factory: AbstractTranscriberFactory,
-        synthesizer_factory: AbstractSynthesizerFactory,
+        agent_factory: AgentFactory,
+        transcriber_factory: TranscriberFactory,
+        synthesizer_factory: SynthesizerFactory,
         twilio_config: Optional[TwilioConfig] = None,
         conversation_id: Optional[str] = None,
         events_manager: Optional[EventsManager] = None,
@@ -15609,13 +15609,27 @@ class CustomTwilioPhoneConversation(TwilioPhoneConversation):
             noise_suppression=noise_suppression,
         )
         self.twilio_sid = twilio_sid
-        logger.debug(f"CustomTwilioPhoneConversation initialized with twilio_sid: {twilio_sid}, conversation_id: {conversation_id}")
+        # Updated: Ensure conversation_id is set to twilio_sid if not provided
+        self.conversation_id = conversation_id or twilio_sid
+        logger.debug(f"CustomTwilioPhoneConversation initialized with twilio_sid: {twilio_sid}, conversation_id: {self.conversation_id}")
 
     async def attach_ws_and_start(self, ws: WebSocket, call_sid: Optional[str] = None):
         try:
+            # Updated: Use call_sid from parameter or self.twilio_sid if not provided
             if call_sid and not self.conversation_id:
                 self.conversation_id = call_sid
                 logger.debug(f"Set conversation_id to call_sid: {call_sid}")
+            elif not self.conversation_id:
+                self.conversation_id = self.twilio_sid
+                logger.debug(f"Set conversation_id to twilio_sid: {self.twilio_sid}")
+            
+            # Updated: Ensure agent is created with correct conversation_id
+            self.agent = self.agent_factory.create_agent(
+                agent_config=self.agent_config,
+                conversation_id=self.conversation_id  # Pass conversation_id to agent
+            )
+            logger.debug(f"Created agent with conversation_id: {self.conversation_id}")
+            
             super().attach_ws(ws)
             await self._wait_for_twilio_start(ws)
             await self.start()
@@ -16070,11 +16084,13 @@ async def inbound_call(request: Request):
                 "prompt_preamble": PROMPT_CONFIGS["default"]["prompt_preamble"]
             }
         
+        # Updated: Pass call_sid explicitly to telephony_server.handle_inbound_call
         twiml = await telephony_server.handle_inbound_call(
             call_sid=call_sid,
             from_phone=from_phone,
             to_phone=to_phone,
-            base_url=BASE_URL
+            base_url=BASE_URL,
+            conversation_id=call_sid  # Ensure conversation_id is set to call_sid
         )
         logger.debug(f"Returning TwiML: {twiml}")
         return Response(content=twiml, media_type="application/xml")

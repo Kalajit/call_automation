@@ -17709,15 +17709,23 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
     )
 
     try:
-        lead_data = lead or {}
-        lead_data["prompt_config_key"] = prompt_config_key
-        lead_data["initial_message"] = initial_message
-        lead_data["prompt_preamble"] = PROMPT_CONFIGS[prompt_config_key]["prompt_preamble"]
+        # Prepare minimal lead data for query parameters
+        lead_data = {
+            "prompt_config_key": prompt_config_key,
+            "name": lead.get("name", ""),
+            "email": lead.get("email", ""),
+            "phone_number": lead.get("phone_number", ""),
+            "role": lead.get("role", "")
+        }
         
-        # Encode lead_data as a URL query parameter
-        import urllib.parse
-        lead_data_encoded = urllib.parse.urlencode({"lead_data": json.dumps(lead_data)})
-        call_url = f"{twilio_base_url}/inbound_call?{lead_data_encoded}"
+        # Encode lead_data as query parameters
+        query_params = urllib.parse.urlencode({k: v for k, v in lead_data.items() if v}, safe=":")
+        call_url = f"{twilio_base_url}/inbound_call?{query_params}"
+
+        # Check URL length
+        if len(call_url) > 4000:
+            logger.error(f"Generated URL exceeds 4000 characters: {len(call_url)}")
+            raise HTTPException(status_code=400, detail="Generated URL exceeds Twilio's 4000-character limit")
 
         call = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -17735,10 +17743,19 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
 
         logger.info(f"Call initiated: SID={call.sid}, type={call_type}, prompt_config_key={prompt_config_key}")
 
+        # Store full lead data in CONVERSATION_STORE
+        full_lead_data = lead or {}
+        full_lead_data.update({
+            "prompt_config_key": prompt_config_key,
+            "initial_message": initial_message,
+            "prompt_preamble": PROMPT_CONFIGS[prompt_config_key]["prompt_preamble"],
+            "to_phone": to_phone
+        })
+
         CONVERSATION_STORE[call.sid] = {
             "conversation_id": call.sid,
             "updated_at": int(time.time() * 1000),
-            "lead": lead_data,
+            "lead": full_lead_data,
             "slots": {},
             "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time() * 1000)}]
         }
@@ -17776,25 +17793,31 @@ async def inbound_call(request: Request):
                 media_type="application/xml"
             )
         
-        # Extract lead_data from query parameters
+        # Extract lead data from query parameters
         query_params = request.query_params
-        lead_data_str = query_params.get("lead_data")
-        lead = {}
-        if lead_data_str:
-            try:
-                lead = json.loads(lead_data_str)
-                logger.debug(f"Extracted lead data: {lead}")
-            except json.JSONDecodeError:
-                logger.warning(f"Failed to parse lead_data: {lead_data_str}. Using default context.")
-        else:
-            logger.warning(f"No lead_data provided for CallSid={call_sid}. Using default context.")
-            lead = {
-                "to_phone": to_phone,
-                "from_phone": from_phone,
-                "prompt_config_key": "default",
-                "initial_message": PROMPT_CONFIGS["default"]["initial_message"],
-                "prompt_preamble": PROMPT_CONFIGS["default"]["prompt_preamble"]
-            }
+        prompt_config_key = query_params.get("prompt_config_key", "default")
+        if prompt_config_key not in PROMPT_CONFIGS:
+            logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Using default.")
+            prompt_config_key = "default"
+
+        lead = {
+            "prompt_config_key": prompt_config_key,
+            "prompt_preamble": PROMPT_CONFIGS[prompt_config_key]["prompt_preamble"],
+            "initial_message": PROMPT_CONFIGS[prompt_config_key]["initial_message"],
+            "to_phone": to_phone,
+            "from_phone": from_phone,
+            "name": query_params.get("name", ""),
+            "email": query_params.get("email", ""),
+            "phone_number": query_params.get("phone_number", ""),
+            "role": query_params.get("role", "")
+        }
+
+        # Replace {{name}} in initial_message
+        lead["initial_message"] = lead["initial_message"].replace(
+            "{{name}}", lead.get("name", "there")
+        )
+
+        logger.debug(f"Reconstructed lead data: {lead}")
 
         twiml = await telephony_server.handle_inbound_call(
             call_sid=call_sid,

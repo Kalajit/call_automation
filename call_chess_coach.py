@@ -17523,15 +17523,34 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
             self.audio_buffer = io.BytesIO()
 
 # Custom Agent Factory
-class CustomAgentFactory:
-    def create_agent(self, agent_config: AgentConfig, logger: Optional[logging.Logger] = None, conversation_id: Optional[str] = None) -> BaseAgent:
-        log = logger or globals().get('logger', logging.getLogger(__name__))
-        log.debug(f"Creating agent with config type: {agent_config.type}, conversation_id: {conversation_id}")
-        if agent_config.type == "agent_langchain":
-            log.debug("Creating CustomLangchainAgent")
-            return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=conversation_id)
-        log.error(f"Invalid agent config type: {agent_config.type}")
-        raise Exception(f"Invalid agent config: {agent_config.type}")
+class CustomAgentFactory(AbstractAgentFactory):
+    def create_agent(
+        self,
+        agent_config: AgentConfig,
+        conversation_id: str,
+        lead: dict = None,
+        prompt_config_key: str = "default"
+    ) -> BaseAgent:
+        logger.debug(f"Creating agent with prompt_config_key={prompt_config_key}, lead={lead}")
+        if lead and "prompt_config_key" in lead:
+            prompt_config_key = lead["prompt_config_key"]
+        if prompt_config_key in PROMPT_CONFIGS:
+            agent_config.initial_message = BaseMessage(
+                text=PROMPT_CONFIGS[prompt_config_key]["initial_message"].replace(
+                    "{{name}}", lead.get("name", "there") if lead else "there"
+                )
+            )
+            agent_config.prompt_preamble = PROMPT_CONFIGS[prompt_config_key]["prompt_preamble"]
+        else:
+            logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Using default.")
+            agent_config.initial_message = BaseMessage(text="Hello, how can I assist you today?")
+            agent_config.prompt_preamble = ""
+        logger.debug(f"Final agent_config: initial_message={agent_config.initial_message.text}, prompt_preamble={agent_config.prompt_preamble}")
+        return CustomLangchainAgent(
+            agent_config=agent_config,
+            conversation_id=conversation_id,
+            lead=lead
+        )
 
 # Custom Synthesizer Factory
 class CustomSynthesizerFactory:
@@ -17967,7 +17986,6 @@ async def connect_call(request: Request):
             if existing_convo and existing_convo.get("lead"):
                 lead = existing_convo["lead"]
                 logger.debug(f"Retrieved existing lead for call_sid {call_sid}: {lead}")
-                # Update only missing fields from query params
                 lead.update({
                     "name": lead.get("name", query_params.get("name", "")),
                     "email": lead.get("email", query_params.get("email", "")),
@@ -17999,14 +18017,14 @@ async def connect_call(request: Request):
                 }
                 logger.debug(f"Created new lead for call_sid {call_sid}: {lead}")
         
-        # Ensure lead and prompt_config_key are passed to handle_inbound_call
+        # Pass lead and prompt_config_key to handle_inbound_call
         twiml = await telephony_server.handle_inbound_call(
             call_sid=call_sid,
             from_phone=from_phone,
             to_phone=to_phone,
             base_url=BASE_URL,
-            lead=lead,  # Pass the lead dictionary explicitly
-            prompt_config_key=prompt_config_key  # Explicitly pass prompt_config_key
+            lead=lead,
+            prompt_config_key=prompt_config_key
         )
         logger.debug(f"Returning TwiML: {twiml}")
         return Response(content=twiml, media_type="application/xml")

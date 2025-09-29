@@ -16839,20 +16839,28 @@ class ChessEventsManager(events_manager.EventsManager):
             transcript = transcript_complete_event.transcript.to_string()
             logger.debug(f"Transcript for conversation {transcript_complete_event.conversation_id}: {transcript}")
 
-            sentiment = await sentiment_chain.ainvoke({"transcript": transcript})
-            summary = await summary_chain.ainvoke({"transcript": transcript})
-            audio_path = await save_recording(transcript_complete_event.conversation_id)
-            audio_url = f"{CLOUD_STORAGE_URL}/{os.path.basename(audio_path)}" if CLOUD_STORAGE_URL and audio_path else ""
-
-            client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-            recordings = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: client.recordings.list(call_sid=transcript_complete_event.conversation_id)
-            )
-            twilio_audio_url = recordings[0].uri if recordings else None
-
             try:
-                await update_crm(  # FIXED: Use async
+                # Sentiment Analysis
+                sentiment_response = await sentiment_chain.ainvoke({"transcript": transcript})
+                sentiment = json.loads(sentiment_response.content)
+                logger.debug(f"Sentiment analysis: {sentiment}")
+
+                # Summary Generation
+                summary_response = await summary_chain.ainvoke({"transcript": transcript})
+                summary = json.loads(summary_response.content)
+                logger.debug(f"Summary generated: {summary}")
+
+                audio_path = await save_recording(transcript_complete_event.conversation_id)
+                audio_url = f"{CLOUD_STORAGE_URL}/{os.path.basename(audio_path)}" if CLOUD_STORAGE_URL and audio_path else ""
+
+                client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+                recordings = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: client.recordings.list(call_sid=transcript_complete_event.conversation_id)
+                )
+                twilio_audio_url = recordings[0].uri if recordings else None
+
+                await update_crm(
                     transcript_complete_event.conversation_id,
                     transcript,
                     sentiment,
@@ -16860,30 +16868,27 @@ class ChessEventsManager(events_manager.EventsManager):
                     audio_url,
                     twilio_audio_url=twilio_audio_url
                 )
-            except Exception as e:
-                logger.error(f"CRM update failed in handle_event: {str(e)}")
 
-            short_summary = f"Call Summary: {summary['summary'][:100]}... Next steps: {', '.join(summary['next_actions'][:2])}"
-            async with CONVERSATION_LOCK:  # FIXED: Lock CONVERSATION_STORE
-                convo = CONVERSATION_STORE.get(transcript_complete_event.conversation_id, {})
-                lead = convo.get("lead", {})
-                if lead.get("email"):
-                    send_email(lead["email"], "Call Summary", short_summary)
-                if lead.get("to_phone"):
-                    send_whatsapp(lead["to_phone"], short_summary)
+                short_summary = f"Call Summary: {summary['summary'][:100]}... Next steps: {', '.join(summary['next_actions'][:2])}"
+                async with CONVERSATION_LOCK:
+                    convo = CONVERSATION_STORE.get(transcript_complete_event.conversation_id, {})
+                    lead = convo.get("lead", {})
+                    if lead.get("email"):
+                        send_email(lead["email"], "Call Summary", short_summary)
+                    if lead.get("to_phone"):
+                        send_whatsapp(lead["to_phone"], short_summary)
 
-            webhook_url = os.getenv("TRANSCRIPT_CALLBACK_URL")
-            if webhook_url:
-                data = {"conversation_id": transcript_complete_event.conversation_id, "user_id": 1, "transcript": transcript}
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(webhook_url, json=data)
-                    if response.status_code == 200:
-                        logger.info("Transcript sent successfully to webhook")
-                    else:
-                        logger.error(f"Failed to send transcript to webhook: {response.status_code}")
-            # ADDED for JSON capture with LLM extraction: write store JSON to disk
-            async with CONVERSATION_LOCK:  # FIXED: Lock CONVERSATION_STORE
-                try:
+                webhook_url = os.getenv("TRANSCRIPT_CALLBACK_URL")
+                if webhook_url:
+                    data = {"conversation_id": transcript_complete_event.conversation_id, "user_id": 1, "transcript": transcript}
+                    async with httpx.AsyncClient() as client:
+                        response = await client.post(webhook_url, json=data)
+                        if response.status_code == 200:
+                            logger.info("Transcript sent successfully to webhook")
+                        else:
+                            logger.error(f"Failed to send transcript to webhook: {response.status_code}")
+
+                async with CONVERSATION_LOCK:
                     convo = CONVERSATION_STORE.get(transcript_complete_event.conversation_id)
                     if convo:
                         convo["sentiment"] = sentiment
@@ -16892,8 +16897,10 @@ class ChessEventsManager(events_manager.EventsManager):
                         with open(out_path, "w", encoding="utf-8") as f:
                             json.dump(convo, f, ensure_ascii=False, indent=2)
                         logger.info(f"Wrote JSON summary to {out_path}")
-                except Exception as e:
-                    logger.error(f"Failed to write JSON summary: {e}")
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse LLM response: {str(e)}")
+            except Exception as e:
+                logger.error(f"CRM update failed in handle_event: {str(e)}")
 
 # Transcriber Registry
 TRANSCRIBER_REGISTRY: dict = {}  # Store transcribers by conversation_id
@@ -17343,14 +17350,23 @@ class CustomTwilioPhoneConversation(TwilioPhoneConversation):
 
     async def attach_ws_and_start(self, ws: WebSocket, call_sid: Optional[str] = None):
         try:
-            if call_sid and not self.conversation_id:
+            if call_sid:
                 self.conversation_id = call_sid
                 logger.debug(f"Set conversation_id to call_sid: {call_sid}")
+            else:
+                self.conversation_id = self.conversation_id or str(uuid.uuid4())
+                logger.debug(f"Generated conversation_id: {self.conversation_id}")
+            
+            # Retrieve lead from CONVERSATION_STORE if not set
+            if not self.lead and self.conversation_id in CONVERSATION_STORE:
+                self.lead = CONVERSATION_STORE[self.conversation_id].get("lead", {})
+                logger.debug(f"Retrieved lead from CONVERSATION_STORE: {self.lead}")
+
             agent_config = self.agent_config
             if self.lead and "prompt_config_key" in self.lead:
                 prompt_config_key = self.lead.get("prompt_config_key", "default")
                 if prompt_config_key not in PROMPT_CONFIGS:
-                    logger.warning(f"Invalid prompt_config_key in lead: {prompt_config_key}. Using default.")
+                    logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Using default.")
                     prompt_config_key = "default"
                 agent_config = CustomLangchainAgentConfig(
                     initial_message=BaseMessage(
@@ -17363,23 +17379,27 @@ class CustomTwilioPhoneConversation(TwilioPhoneConversation):
                     api_key=self.agent_config.api_key,
                     provider=self.agent_config.provider,
                 )
-                logger.debug(f"Updated agent_config with lead data: initial_message='{agent_config.initial_message.text}', prompt_config_key={prompt_config_key}")
+                logger.debug(f"Updated agent_config with lead: initial_message='{agent_config.initial_message.text}', prompt_config_key={prompt_config_key}")
+
             self.agent = CustomAgentFactory().create_agent(
                 agent_config=agent_config,
-                conversation_id=call_sid,
-                lead=self.lead  # FIXED: Pass self.lead to create_agent
+                conversation_id=self.conversation_id,
+                lead=self.lead
             )
             logger.debug(f"Created agent with conversation_id: {self.conversation_id}, lead: {self.lead}")
+
             # Register transcriber
             if self.transcriber:
                 TRANSCRIBER_REGISTRY[self.conversation_id] = self.transcriber
                 self.transcriber.set_conversation_id(self.conversation_id)
+                logger.debug(f"Registered transcriber for conversation_id: {self.conversation_id}")
+
             super().attach_ws(ws)
             await self._wait_for_twilio_start(ws)
             await self.start()
             self.events_manager.publish_event(
                 PhoneCallConnectedEvent(
-                    conversation_id=self.id,
+                    conversation_id=self.conversation_id,
                     to_phone_number=self.to_phone,
                     from_phone_number=self.from_phone,
                 )
@@ -17637,17 +17657,18 @@ async def call_status(request: Request):
     try:
         raw_body = await request.body()
         logger.debug(f"Raw call_status body: {raw_body}")
-        data = await request.json()
+        data = urllib.parse.parse_qs(raw_body.decode('utf-8'))
+        data = {k: v[0] for k, v in data.items()}
         call_sid = data.get("CallSid")
         if data.get("CallStatus") == "completed":
-            logger.info(f"Inbound call {call_sid} completed")
-        return {"ok": True}
-    except json.JSONDecodeError:
-        logger.warning(f"Received non-JSON data in call_status callback: {raw_body.decode('utf-8', errors='ignore')}")
+            logger.info(f"Call {call_sid} completed")
         return {"ok": True}
     except Exception as e:
-        logger.error(f"Error in call_status: {e}")
+        logger.error(f"Error in call_status: {str(e)}")
         return {"ok": False}
+    
+
+    
 
 
 # NEW: Endpoint to serve conversation JSON files

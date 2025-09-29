@@ -17805,7 +17805,9 @@ async def health_check():
 # Outbound call helper
 async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, prompt_config_key: str = "default"):
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    twilio_base_url = BASE_URL  # Removed redundant https://
+    twilio_base_url = BASE_URL
+    if not twilio_base_url.startswith(('http://', 'https://')):
+        twilio_base_url = f"https://{twilio_base_url}"  # Ensure https:// is prepended
     if not to_phone or not re.match(r"^\+\d{10,15}$", to_phone):
         logger.error(f"Invalid phone number format: {to_phone}")
         raise HTTPException(status_code=400, detail="Invalid phone number format. Must be in E.164 format (e.g., +1234567890).")
@@ -17863,7 +17865,6 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
     except Exception as e:
         logger.error(f"Unexpected error in make_outbound_call: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
-
 
 
 

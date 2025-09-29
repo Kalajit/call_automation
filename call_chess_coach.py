@@ -17998,12 +17998,15 @@ async def connect_call(request: Request):
                     "turns": [{"speaker": "bot", "text": lead["initial_message"], "ts": int(time.time() * 1000)}]
                 }
                 logger.debug(f"Created new lead for call_sid {call_sid}: {lead}")
+        
+        # Ensure lead and prompt_config_key are passed to handle_inbound_call
         twiml = await telephony_server.handle_inbound_call(
             call_sid=call_sid,
             from_phone=from_phone,
             to_phone=to_phone,
             base_url=BASE_URL,
-            lead=lead
+            lead=lead,  # Pass the lead dictionary explicitly
+            prompt_config_key=prompt_config_key  # Explicitly pass prompt_config_key
         )
         logger.debug(f"Returning TwiML: {twiml}")
         return Response(content=twiml, media_type="application/xml")

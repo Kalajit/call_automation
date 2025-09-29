@@ -14434,7 +14434,7 @@ import httpx
 import typing
 import time
 from typing import Optional, Tuple
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response,WebSocket,HTTPException
 from fastapi.logger import logger as fastapi_logger
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -14452,7 +14452,7 @@ from vocode.streaming.models.synthesizer import StreamElementsSynthesizerConfig,
 from vocode.streaming.synthesizer.base_synthesizer import BaseSynthesizer
 from vocode.streaming.telephony.config_manager.in_memory_config_manager import InMemoryConfigManager
 from vocode.streaming.agent.base_agent import BaseAgent
-from vocode.streaming.models.events import Event, EventType
+from vocode.streaming.models.events import Event, EventType, PhoneCallConnectedEvent
 from vocode.streaming.models.transcript import TranscriptCompleteEvent
 from langchain_core.runnables import RunnableSequence
 from vocode.streaming.utils import events_manager
@@ -14486,6 +14486,15 @@ import requests  # NEW: for CRM API calls
 from pydub import AudioSegment  # NEW: For audio conversion (MP3/WAV)
 import wave  # NEW: For WAV file handling
 import io
+# NEW: Import for overriding TwilioPhoneConversation
+from vocode.streaming.telephony.conversation.twilio_phone_conversation import TwilioPhoneConversation, TwilioPhoneConversationWebsocketAction
+from vocode.streaming.telephony.config_manager.base_config_manager import BaseConfigManager
+from vocode.streaming.agent.abstract_factory import AbstractAgentFactory
+from vocode.streaming.transcriber.abstract_factory import AbstractTranscriberFactory
+from vocode.streaming.synthesizer.abstract_factory import AbstractSynthesizerFactory
+from vocode.streaming.models.transcriber import TranscriberConfig
+from vocode.streaming.utils.events_manager import EventsManager
+
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -15214,7 +15223,7 @@ class CustomLangchainAgent(LangchainAgent):
             logger.warning(f"No LEAD_CONTEXT_STORE entry for call_sid {call_sid}. Using provided agent_config.")
         
         logger.debug(f"Final agent_config: initial_message='{final_agent_config.initial_message.text}'")
-        super().__init__(agent_config=final_agent_config)
+        super().__init__(agent_config=final_agent_config, conversation_id=conversation_id)  # Pass conversation_id to parent
         self.last_response_time = time.time()
         self.conversation_state = "initial"
         self.no_input_count = 0
@@ -15554,6 +15563,75 @@ class CustomLangchainAgent(LangchainAgent):
 
 
 
+# NEW: Custom TwilioPhoneConversation to Pass CallSid
+class CustomTwilioPhoneConversation(TwilioPhoneConversation):
+    def __init__(
+        self,
+        direction: str,
+        from_phone: str,
+        to_phone: str,
+        base_url: str,
+        config_manager: BaseConfigManager,
+        agent_config: AgentConfig,
+        transcriber_config: TranscriberConfig,
+        synthesizer_config: SynthesizerConfig,
+        twilio_sid: str,
+        agent_factory: AbstractAgentFactory,
+        transcriber_factory: AbstractTranscriberFactory,
+        synthesizer_factory: AbstractSynthesizerFactory,
+        twilio_config: Optional[TwilioConfig] = None,
+        conversation_id: Optional[str] = None,
+        events_manager: Optional[EventsManager] = None,
+        record_call: bool = False,
+        speed_coefficient: float = 1.0,
+        noise_suppression: bool = False,
+    ):
+        super().__init__(
+            direction=direction,
+            from_phone=from_phone,
+            to_phone=to_phone,
+            base_url=base_url,
+            config_manager=config_manager,
+            agent_config=agent_config,
+            transcriber_config=transcriber_config,
+            synthesizer_config=synthesizer_config,
+            twilio_sid=twilio_sid,
+            agent_factory=agent_factory,
+            transcriber_factory=transcriber_factory,
+            synthesizer_factory=synthesizer_factory,
+            twilio_config=twilio_config,
+            conversation_id=conversation_id,
+            events_manager=events_manager,
+            record_call=record_call,
+            speed_coefficient=speed_coefficient,
+            noise_suppression=noise_suppression,
+        )
+        self.twilio_sid = twilio_sid
+        logger.debug(f"CustomTwilioPhoneConversation initialized with twilio_sid: {twilio_sid}, conversation_id: {conversation_id}")
+
+    async def attach_ws_and_start(self, ws: WebSocket, call_sid: Optional[str] = None):
+        if call_sid and not self.conversation_id:
+            self.conversation_id = call_sid
+            logger.debug(f"Set conversation_id to call_sid: {call_sid}")
+        super().attach_ws(ws)
+        await self._wait_for_twilio_start(ws)
+        await self.start()
+        self.events_manager.publish_event(
+            PhoneCallConnectedEvent(
+                conversation_id=self.id,
+                to_phone_number=self.to_phone,
+                from_phone_number=self.from_phone,
+            )
+        )
+        while self.is_active():
+            message = await ws.receive_text()
+            response = await self._handle_ws_message(message)
+            if response == TwilioPhoneConversationWebsocketAction.CLOSE_WEBSOCKET:
+                break
+        await ws.close(code=1000, reason=None)
+        await self.terminate()
+
+
 
 
 
@@ -15613,12 +15691,12 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
 
 # Custom Agent Factory
 class CustomAgentFactory:
-    def create_agent(self, agent_config: AgentConfig, logger: Optional[logging.Logger] = None) -> BaseAgent:
+    def create_agent(self, agent_config: AgentConfig, logger: Optional[logging.Logger] = None, conversation_id: Optional[str] = None) -> BaseAgent:
         log = logger or globals().get('logger', logging.getLogger(__name__))
-        log.debug(f"Creating agent with config type: {agent_config.type}")
+        log.debug(f"Creating agent with config type: {agent_config.type}, conversation_id: {conversation_id}")
         if agent_config.type == "agent_langchain":
             log.debug("Creating CustomLangchainAgent")
-            return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
+            return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=conversation_id)
         log.error(f"Invalid agent config type: {agent_config.type}")
         raise Exception(f"Invalid agent config: {agent_config.type}")
 
@@ -15738,7 +15816,8 @@ telephony_server = TelephonyServer(
             record=True,
             status_callback=f"https://{BASE_URL}/call_status",
             status_callback_method="POST",
-            status_callback_event=["completed"]
+            status_callback_event=["completed"],
+            conversation_class=CustomTwilioPhoneConversation,  # Use custom conversation class
         )
     ],
     agent_factory=CustomAgentFactory(),
@@ -15915,6 +15994,42 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, a
     except TwilioRestException as e:
         logger.error(f"Twilio error in make_outbound_call: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Failed to initiate call: {str(e)}")
+    
+
+
+
+# NEW: Inbound call endpoint to capture CallSid
+@app.post("/inbound_call")
+async def inbound_call(request: Request):
+    try:
+        data = await request.form()  # Twilio sends form data
+        call_sid = data.get("CallSid")
+        from_phone = data.get("From")
+        to_phone = data.get("To")
+        logger.debug(f"Inbound call received: CallSid={call_sid}, From={from_phone}, To={to_phone}")
+        
+        if call_sid in LEAD_CONTEXT_STORE:
+            logger.debug(f"Found lead context for CallSid={call_sid}: {LEAD_CONTEXT_STORE[call_sid]}")
+        else:
+            logger.warning(f"No lead context found for CallSid={call_sid}. Using default context.")
+            LEAD_CONTEXT_STORE[call_sid] = {
+                "to_phone": to_phone,
+                "from_phone": from_phone,
+                "agent_type": "default",
+                "initial_message": PROMPT_CONFIGS["default"]["initial_message"],
+                "prompt_preamble": PROMPT_CONFIGS["default"]["prompt_preamble"]
+            }
+        
+        twiml = await telephony_server.handle_inbound_call(
+            call_sid=call_sid,
+            from_phone=from_phone,
+            to_phone=to_phone,
+            base_url=BASE_URL
+        )
+        return Response(content=twiml, media_type="application/xml")
+    except Exception as e:
+        logger.error(f"Error in inbound_call: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to handle inbound call: {str(e)}")
 
 
 

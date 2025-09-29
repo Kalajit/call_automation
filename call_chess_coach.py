@@ -15225,7 +15225,7 @@ class CustomLangchainAgent(LangchainAgent):
             logger.warning(f"No LEAD_CONTEXT_STORE entry for call_sid {call_sid}. Using provided agent_config.")
         
         logger.debug(f"Final agent_config: initial_message='{final_agent_config.initial_message.text}'")
-        super().__init__(agent_config=final_agent_config, conversation_id=conversation_id)  # Pass conversation_id to parent
+        super().__init__(agent_config=final_agent_config)
         self.last_response_time = time.time()
         self.conversation_state = "initial"
         self.no_input_count = 0

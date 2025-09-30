@@ -16218,6 +16218,7 @@ from vocode.streaming.utils.events_manager import EventsManager
 import base64
 import urllib.parse
 import uuid
+from vocode.streaming.telephony.server.base import BaseTelephonyServer
 
 
 
@@ -17531,7 +17532,7 @@ class CustomAgentFactory(AbstractAgentFactory):
         lead: dict = None,
         prompt_config_key: str = "default"
     ) -> BaseAgent:
-        logger.debug(f"Creating agent with prompt_config_key={prompt_config_key}, lead={lead}")
+        logger.debug(f"Creating agent with prompt_config_key={prompt_config_key}, lead={lead}, conversation_id={conversation_id}")
         if lead and "prompt_config_key" in lead:
             prompt_config_key = lead["prompt_config_key"]
         if prompt_config_key in PROMPT_CONFIGS:
@@ -17561,6 +17562,95 @@ class CustomSynthesizerFactory:
             return StreamElementsSynthesizer(synthesizer_config)
         logger.error(f"Invalid synthesizer config type: {synthesizer_config.type}")
         raise Exception(f"Invalid synthesizer config: {synthesizer_config.type}")
+
+
+class CustomTelephonyServer(BaseTelephonyServer):
+    async def create_phone_conversation(
+        self,
+        call_sid: str,
+        from_phone: str,
+        to_phone: str,
+        base_url: str,
+        agent_config: AgentConfig,
+        transcriber_config: TranscriberConfig,
+        synthesizer_config: SynthesizerConfig,
+        conversation_id: str = None,
+        lead: dict = None,
+        prompt_config_key: str = "default",
+        **kwargs
+    ):
+        logger.debug(f"Creating phone conversation with call_sid={call_sid}, conversation_id={conversation_id}, lead={lead}, prompt_config_key={prompt_config_key}")
+        # Ensure conversation_id is set (use call_sid if None)
+        conversation_id = conversation_id or call_sid
+        # Update agent_config with lead data if provided
+        if lead and "prompt_config_key" in lead:
+            prompt_config_key = lead["prompt_config_key"]
+        if prompt_config_key in PROMPT_CONFIGS:
+            agent_config.initial_message = BaseMessage(
+                text=PROMPT_CONFIGS[prompt_config_key]["initial_message"].replace(
+                    "{{name}}", lead.get("name", "there") if lead else "there"
+                )
+            )
+            agent_config.prompt_preamble = PROMPT_CONFIGS[prompt_config_key]["prompt_preamble"]
+        else:
+            logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Using default.")
+            agent_config.initial_message = BaseMessage(text="Hello, how can I assist you today?")
+            agent_config.prompt_preamble = ""
+        
+        # Call the parent class's create_phone_conversation with conversation_id
+        return await super().create_phone_conversation(
+            call_sid=call_sid,
+            from_phone=from_phone,
+            to_to_phone=to_phone,
+            base_url=base_url,
+            agent_config=agent_config,
+            transcriber_config=transcriber_config,
+            synthesizer_config=synthesizer_config,
+            conversation_id=conversation_id,  # Pass conversation_id explicitly
+            lead=lead,  # Pass lead to CustomTwilioPhoneConversation
+            **kwargs
+        )
+
+    async def handle_inbound_call(
+        self,
+        call_sid: str,
+        from_phone: str,
+        to_phone: str,
+        base_url: str,
+        lead: dict = None,
+        prompt_config_key: str = "default",
+        conversation_id: str = None
+    ):
+        logger.debug(f"Handling inbound call: call_sid={call_sid}, prompt_config_key={prompt_config_key}, lead={lead}, conversation_id={conversation_id}")
+        # Ensure conversation_id is set
+        conversation_id = conversation_id or call_sid
+        # Create agent_config with lead data
+        agent_config = CustomLangchainAgentConfig(
+            initial_message=BaseMessage(
+                text=PROMPT_CONFIGS[prompt_config_key]["initial_message"].replace(
+                    "{{name}}", lead.get("name", "there") if lead else "there"
+                )
+            ),
+            prompt_preamble=PROMPT_CONFIGS[prompt_config_key]["prompt_preamble"],
+            model_name="llama-3.1-8b-instant",
+            api_key=GROQ_API_KEY,
+            provider="groq"
+        )
+        transcriber_config = DeepgramTranscriberConfig.from_telephone_input_device()
+        synthesizer_config = StreamElementsSynthesizerConfig.from_telephone_output_device()
+        # Call create_phone_conversation with conversation_id
+        return await self.create_phone_conversation(
+            call_sid=call_sid,
+            from_phone=from_phone,
+            to_phone=to_phone,
+            base_url=base_url,
+            agent_config=agent_config,
+            transcriber_config=transcriber_config,
+            synthesizer_config=synthesizer_config,
+            conversation_id=conversation_id,
+            lead=lead,
+            prompt_config_key=prompt_config_key
+        )
 
 # FastAPI App
 app = FastAPI()
@@ -17681,7 +17771,8 @@ default_agent_config = CustomLangchainAgentConfig(
 
 
 
-telephony_server = TelephonyServer(
+# Telephony Server setup
+telephony_server = CustomTelephonyServer(
     base_url=BASE_URL,
     config_manager=config_manager,
     inbound_call_configs=[
@@ -18017,14 +18108,15 @@ async def connect_call(request: Request):
                 }
                 logger.debug(f"Created new lead for call_sid {call_sid}: {lead}")
         
-        # Pass lead and prompt_config_key to handle_inbound_call
+        # Pass lead, prompt_config_key, and conversation_id (call_sid) to handle_inbound_call
         twiml = await telephony_server.handle_inbound_call(
             call_sid=call_sid,
             from_phone=from_phone,
             to_phone=to_phone,
             base_url=BASE_URL,
             lead=lead,
-            prompt_config_key=prompt_config_key
+            prompt_config_key=prompt_config_key,
+            conversation_id=call_sid  # Explicitly pass call_sid as conversation_id
         )
         logger.debug(f"Returning TwiML: {twiml}")
         return Response(content=twiml, media_type="application/xml")

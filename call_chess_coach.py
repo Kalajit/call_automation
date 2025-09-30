@@ -19330,12 +19330,18 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
 
 # Custom Agent Factory
 class CustomAgentFactory:
-    def create_agent(self, agent_config: AgentConfig, logger: Optional[logging.Logger] = None) -> BaseAgent:
+    def create_agent(self, agent_config: AgentConfig, logger: Optional[logging.Logger] = None, conversation_id: Optional[str] = None) -> BaseAgent:
         log = logger or globals().get('logger', logging.getLogger(__name__))
-        log.debug(f"Creating agent with config type: {agent_config.type}")
+        log.debug(f"Creating agent with config type: {agent_config.type}, conversation_id: {conversation_id}")
         if agent_config.type == "agent_langchain":
-            log.debug("Creating CustomLangchainAgent")
-            return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
+            if conversation_id:
+                stored_config = config_manager.get_config(f"agent_{conversation_id}")
+                if stored_config:
+                    log.debug(f"Using stored agent config for conversation_id: {conversation_id}")
+                    return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, stored_config))
+            # For inbound calls without stored config, use DEFAULT_PROMPT_KEY
+            log.debug(f"No stored config for {conversation_id}, using DEFAULT_PROMPT_KEY: {DEFAULT_PROMPT_KEY}")
+            return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, get_default_agent_config(DEFAULT_PROMPT_KEY)))
         log.error(f"Invalid agent config type: {agent_config.type}")
         raise Exception(f"Invalid agent config: {agent_config.type}")
 
@@ -19395,11 +19401,13 @@ transcriber_config = DeepgramTranscriberConfig(
     downsampling=1,
 )
 
-def get_default_agent_config():
-    prompt_key = DEFAULT_PROMPT_KEY if DEFAULT_PROMPT_KEY in PROMPT_CONFIGS else "chess_coach"  # Fallback to chess_coach
+def get_default_agent_config(prompt_key: str = None):
+    selected_key = prompt_key or DEFAULT_PROMPT_KEY
+    if not selected_key or selected_key not in PROMPT_CONFIGS:
+        raise ValueError(f"No valid prompt_config_key provided. Got {selected_key}, available: {list(PROMPT_CONFIGS.keys())}")
     return CustomLangchainAgentConfig(
-        initial_message=BaseMessage(text=PROMPT_CONFIGS[prompt_key]["initial_message"].replace("{{name}}", "there")),
-        prompt_preamble=PROMPT_CONFIGS[prompt_key]["prompt_preamble"],
+        initial_message=BaseMessage(text=PROMPT_CONFIGS[selected_key]["initial_message"].replace("{{name}}", "there")),
+        prompt_preamble=PROMPT_CONFIGS[selected_key]["prompt_preamble"],
         model_name="llama-3.1-8b-instant",
         api_key=GROQ_API_KEY,
         provider="groq"
@@ -19415,7 +19423,7 @@ telephony_server = TelephonyServer(
         TwilioInboundCallConfig(
             url="/inbound_call",
             twilio_config=twilio_config,
-            agent_config=get_default_agent_config(),
+            agent_config=None,
             synthesizer_config=synthesizer_config,
             transcriber_config=transcriber_config,
             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
@@ -19471,7 +19479,7 @@ class OutboundCallRequest(BaseModel):
     lead: typing.Optional[typing.Dict[str, typing.Any]] = None
     transcript_callback_url: typing.Optional[str] = None
     call_type: str = "qualification"
-    prompt_config_key: str = "chess_coach"  # Updated default to chess_coach
+    prompt_config_key: str  # Required, no default
 
 
 
@@ -19520,7 +19528,7 @@ async def outbound_call(req: OutboundCallRequest):
 
 
 # Outbound call helper
-async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, prompt_config_key: str = "chess_coach"):
+async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, prompt_config_key: str = None):
     try:
         # Validate Twilio credentials
         if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, BASE_URL]):
@@ -19531,7 +19539,9 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
         twilio_base_url = f"https://{BASE_URL}"
         
         # Select prompt config or fallback to default
-        prompt_config = PROMPT_CONFIGS.get(prompt_config_key, PROMPT_CONFIGS["chess_coach"])
+        if not prompt_config_key or prompt_config_key not in PROMPT_CONFIGS:
+            raise ValueError(f"Invalid prompt_config_key: {prompt_config_key}. Available: {list(PROMPT_CONFIGS.keys())}")
+        prompt_config = PROMPT_CONFIGS[prompt_config_key]
         initial_message = prompt_config["initial_message"].replace(
             "{{name}}", lead.get("name", "there") if lead else "there"
         )
@@ -19603,7 +19613,10 @@ def outbound_scheduler():
             for lead in leads:
                 if lead.get("status") == "Call Pending":
                     call_type = lead.get("call_type", "qualification")
-                    prompt_key = lead.get("prompt_config_key", "chess_coach")  # Use lead-specific prompt
+                    prompt_key = lead.get("prompt_config_key")
+                    if not prompt_key or prompt_key not in PROMPT_CONFIGS:
+                        logger.error(f"Invalid prompt_config_key in lead: {prompt_key}")
+                        continue
                     asyncio.run(make_outbound_call(lead["phone"], call_type, lead, prompt_key))
                     update_crm(lead["id"], "", {}, {}, "", status="Calling")
         time.sleep(300)

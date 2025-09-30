@@ -16218,7 +16218,7 @@ from vocode.streaming.utils.events_manager import EventsManager
 import base64
 import urllib.parse
 import uuid
-from vocode.streaming.telephony.server.base import BaseTelephonyServer
+from vocode.streaming.telephony.server.base import TelephonyServer
 
 
 
@@ -17564,7 +17564,7 @@ class CustomSynthesizerFactory:
         raise Exception(f"Invalid synthesizer config: {synthesizer_config.type}")
 
 
-class CustomTelephonyServer(BaseTelephonyServer):
+class CustomTelephonyServer(TelephonyServer):
     async def create_phone_conversation(
         self,
         call_sid: str,

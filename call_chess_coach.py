@@ -19478,9 +19478,10 @@ def normalize_e164(number: str) -> str:
 @app.post("/outbound_call")
 async def outbound_call(req: OutboundCallRequest):
     try:
+        logger.debug(f"Received outbound call request: {req.dict()}")
         to_phone = normalize_e164(req.to_phone)
         if not to_phone or len(to_phone) < 10:
-            raise HTTPException(status_code=400, detail="Invalid phone")
+            raise HTTPException(status_code=400, detail="Invalid phone number format")
         sid = await make_outbound_call(
             to_phone=to_phone,
             call_type=req.call_type,
@@ -19491,63 +19492,87 @@ async def outbound_call(req: OutboundCallRequest):
         if req.transcript_callback_url:
             os.environ["TRANSCRIPT_CALLBACK_URL"] = req.transcript_callback_url
         return {"ok": True, "call_sid": sid}
-    except HTTPException:
+    except HTTPException as e:
+        logger.error(f"HTTP error in /outbound_call: {str(e)}")
         raise
     except Exception as e:
-        logger.error(f"/outbound_call failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"/outbound_call failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process outbound call: {str(e)}")
+    
+    
 
 
 # Outbound call helper
 async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, prompt_config_key: str = "default"):
-    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    twilio_base_url = f"https://{BASE_URL}"
-    # Select prompt config or fallback to default
-    prompt_config = PROMPT_CONFIGS.get(prompt_config_key, PROMPT_CONFIGS["default"])
-    initial_message = prompt_config["initial_message"].replace(
-        "{{name}}", lead.get("name", "there") if lead else "there"
-    )
-    if call_type == "reminder":
-        initial_message = f"This is a reminder for your demo on {lead.get('demo_date', time.strftime('%Y-%m-%d %H:%M IST', time.localtime(time.time() + 86400)))}. Ready?"
-    elif call_type == "payment":
-        initial_message = f"Payment reminder for ₹500 due by {lead.get('due_date', time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400)))}. Settled?"
-    
-    # Create agent config for outbound call
-    agent_config = CustomLangchainAgentConfig(
-        initial_message=BaseMessage(text=initial_message),
-        prompt_preamble=prompt_config["prompt_preamble"],
-        model_name="llama-3.1-8b-instant",
-        api_key=GROQ_API_KEY,
-        provider="groq"
-    )
-    # Store agent config in config_manager for the call
-    await config_manager.save_config(f"agent_{call.sid}", agent_config)
-    
-    call = await asyncio.get_event_loop().run_in_executor(
-        None,
-        lambda: client.calls.create(
-            to=to_phone,
-            from_=TWILIO_PHONE_NUMBER,
-            url=f"{twilio_base_url}/inbound_call",
-            status_callback=f"{twilio_base_url}/call_status",
-            status_callback_method="POST",
-            status_callback_event=["initiated", "ringing", "answered", "completed"],
-            record=True,
-            recording_channels="dual"
+    try:
+        # Validate Twilio credentials
+        if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, BASE_URL]):
+            logger.error("Missing required Twilio environment variables")
+            raise ValueError("Missing required Twilio environment variables")
+
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        twilio_base_url = f"https://{BASE_URL}"
+        
+        # Select prompt config or fallback to default
+        prompt_config = PROMPT_CONFIGS.get(prompt_config_key, PROMPT_CONFIGS["default"])
+        initial_message = prompt_config["initial_message"].replace(
+            "{{name}}", lead.get("name", "there") if lead else "there"
         )
-    )
-    logger.info(f"Call initiated: SID={call.sid}, type={call_type}, prompt_config_key={prompt_config_key}")
-    lead = lead or {}
-    lead.update({"to_phone": to_phone, "call_type": call_type, "prompt_config_key": prompt_config_key})
-    LEAD_CONTEXT_STORE[call.sid] = lead
-    CONVERSATION_STORE.setdefault(call.sid, {
-        "conversation_id": call.sid,
-        "updated_at": int(time.time()*1000),
-        "lead": lead,
-        "slots": {},
-        "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}]
-    })
-    return call.sid
+        if call_type == "reminder":
+            initial_message = f"This is a reminder for your demo on {lead.get('demo_date', time.strftime('%Y-%m-%d %H:%M IST', time.localtime(time.time() + 86400)))}. Ready?"
+        elif call_type == "payment":
+            initial_message = f"Payment reminder for ₹500 due by {lead.get('due_date', time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400)))}. Settled?"
+        
+        # Create agent config for outbound call
+        agent_config = CustomLangchainAgentConfig(
+            initial_message=BaseMessage(text=initial_message),
+            prompt_preamble=prompt_config["prompt_preamble"],
+            model_name="llama-3.1-8b-instant",
+            api_key=GROQ_API_KEY,
+            provider="groq"
+        )
+        
+        # Log Twilio call parameters for debugging
+        call_params = {
+            "to": to_phone,
+            "from_": TWILIO_PHONE_NUMBER,
+            "url": f"{twilio_base_url}/inbound_call",
+            "status_callback": f"{twilio_base_url}/call_status",
+            "status_callback_method": "POST",
+            "status_callback_event": ["initiated", "ringing", "answered", "completed"],
+            "record": True,
+            "recording_channels": "dual"
+        }
+        logger.debug(f"Twilio call parameters: {call_params}")
+        
+        # Make Twilio call
+        try:
+            call = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: client.calls.create(**call_params)
+            )
+        except Exception as twilio_error:
+            logger.error(f"Twilio API call failed: {str(twilio_error)}")
+            raise HTTPException(status_code=500, detail=f"Twilio API error: {str(twilio_error)}")
+        
+        # Store agent config after call is successfully initiated
+        await config_manager.save_config(f"agent_{call.sid}", agent_config)
+        
+        logger.info(f"Call initiated: SID={call.sid}, type={call_type}, prompt_config_key={prompt_config_key}")
+        lead = lead or {}
+        lead.update({"to_phone": to_phone, "call_type": call_type, "prompt_config_key": prompt_config_key})
+        LEAD_CONTEXT_STORE[call.sid] = lead
+        CONVERSATION_STORE.setdefault(call.sid, {
+            "conversation_id": call.sid,
+            "updated_at": int(time.time()*1000),
+            "lead": lead,
+            "slots": {},
+            "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}]
+        })
+        return call.sid
+    except Exception as e:
+        logger.error(f"make_outbound_call failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to initiate call: {str(e)}")
 
 
 

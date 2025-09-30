@@ -18741,6 +18741,9 @@ CONVERSATIONS_DIR.mkdir(exist_ok=True, parents=True)  # ADDED
 LEAD_CONTEXT_STORE: dict = {}  # ADDED n8n
 
 
+# NEW: Store to map WebSocket session IDs to call SIDs
+SESSION_TO_CALL_SID: dict = {}
+
 # Sentiment Analysis Chain (using Groq LLM)
 sentiment_prompt = PromptTemplate(
     input_variables=["transcript"],
@@ -19433,11 +19436,17 @@ app.include_router(telephony_server.get_router())
 # NEW: Endpoint to handle Twilio call status callbacks for inbound calls
 @app.post("/call_status")
 async def call_status(request: Request):
-    data = await request.json()
-    call_sid = data.get("CallSid")
-    if data.get("CallStatus") == "completed":
-        logger.info(f"Inbound call {call_sid} completed")
-    return {"ok": True}
+    try:
+        form_data = await request.form()
+        call_sid = form_data.get("CallSid")
+        call_status = form_data.get("CallStatus")
+        logger.debug(f"Received call status: CallSid={call_sid}, CallStatus={call_status}")
+        if call_status == "completed":
+            logger.info(f"Call {call_sid} completed")
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"Error processing call status: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing call status: {str(e)}")
 
 
 # NEW: Endpoint to serve conversation JSON files

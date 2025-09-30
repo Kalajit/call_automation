@@ -18741,6 +18741,10 @@ CONVERSATIONS_DIR.mkdir(exist_ok=True, parents=True)  # ADDED
 LEAD_CONTEXT_STORE: dict = {}  # ADDED n8n
 
 
+# NEW: Store prompt_config_key from n8n
+DEFAULT_PROMPT_KEY = None  # Will be set in /outbound_call
+
+
 # NEW: Store to map WebSocket session IDs to call SIDs
 SESSION_TO_CALL_SID: dict = {}
 
@@ -19391,13 +19395,15 @@ transcriber_config = DeepgramTranscriberConfig(
     downsampling=1,
 )
 
-default_agent_config = CustomLangchainAgentConfig(
-    initial_message=BaseMessage(text=PROMPT_CONFIGS["default"]["initial_message"].replace("{{name}}", "there")),
-    prompt_preamble=PROMPT_CONFIGS["default"]["prompt_preamble"],
-    model_name="llama-3.1-8b-instant",
-    api_key=GROQ_API_KEY,
-    provider="groq"
-)
+def get_default_agent_config():
+    prompt_key = DEFAULT_PROMPT_KEY if DEFAULT_PROMPT_KEY in PROMPT_CONFIGS else "chess_coach"  # Fallback to chess_coach
+    return CustomLangchainAgentConfig(
+        initial_message=BaseMessage(text=PROMPT_CONFIGS[prompt_key]["initial_message"].replace("{{name}}", "there")),
+        prompt_preamble=PROMPT_CONFIGS[prompt_key]["prompt_preamble"],
+        model_name="llama-3.1-8b-instant",
+        api_key=GROQ_API_KEY,
+        provider="groq"
+    )
 
 
 
@@ -19409,7 +19415,7 @@ telephony_server = TelephonyServer(
         TwilioInboundCallConfig(
             url="/inbound_call",
             twilio_config=twilio_config,
-            agent_config=default_agent_config,
+            agent_config=get_default_agent_config(),
             synthesizer_config=synthesizer_config,
             transcriber_config=transcriber_config,
             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
@@ -19465,7 +19471,7 @@ class OutboundCallRequest(BaseModel):
     lead: typing.Optional[typing.Dict[str, typing.Any]] = None
     transcript_callback_url: typing.Optional[str] = None
     call_type: str = "qualification"
-    prompt_config_key: str = "default"
+    prompt_config_key: str = "chess_coach"  # Updated default to chess_coach
 
 
 
@@ -19488,6 +19494,8 @@ def normalize_e164(number: str) -> str:
 async def outbound_call(req: OutboundCallRequest):
     try:
         logger.debug(f"Received outbound call request: {req.dict()}")
+        global DEFAULT_PROMPT_KEY
+        DEFAULT_PROMPT_KEY = req.prompt_config_key if req.prompt_config_key in PROMPT_CONFIGS else "chess_coach"
         to_phone = normalize_e164(req.to_phone)
         if not to_phone or len(to_phone) < 10:
             raise HTTPException(status_code=400, detail="Invalid phone number format")
@@ -19502,7 +19510,7 @@ async def outbound_call(req: OutboundCallRequest):
             os.environ["TRANSCRIPT_CALLBACK_URL"] = req.transcript_callback_url
         return {"ok": True, "call_sid": sid}
     except HTTPException as e:
-        logger.error(f"HTTP error in /outbound_call: {str(e)}")
+        logger.error(f"HTTP error in /outbound_call: {e}")
         raise
     except Exception as e:
         logger.error(f"/outbound_call failed: {str(e)}")
@@ -19512,7 +19520,7 @@ async def outbound_call(req: OutboundCallRequest):
 
 
 # Outbound call helper
-async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, prompt_config_key: str = "default"):
+async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, prompt_config_key: str = "chess_coach"):
     try:
         # Validate Twilio credentials
         if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, BASE_URL]):
@@ -19523,7 +19531,7 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
         twilio_base_url = f"https://{BASE_URL}"
         
         # Select prompt config or fallback to default
-        prompt_config = PROMPT_CONFIGS.get(prompt_config_key, PROMPT_CONFIGS["default"])
+        prompt_config = PROMPT_CONFIGS.get(prompt_config_key, PROMPT_CONFIGS["chess_coach"])
         initial_message = prompt_config["initial_message"].replace(
             "{{name}}", lead.get("name", "there") if lead else "there"
         )
@@ -19591,13 +19599,16 @@ def outbound_scheduler():
     while True:
         response = requests.get(CRM_API_URL, headers={"Authorization": f"Bearer {CRM_API_KEY}"})
         if response.status_code == 200:
-            leads = response.json().get("leads", [])  # Adjusted to 'leads' for generality
+            leads = response.json().get("leads", [])
             for lead in leads:
                 if lead.get("status") == "Call Pending":
                     call_type = lead.get("call_type", "qualification")
-                    asyncio.run(make_outbound_call(lead["phone"], call_type, lead))
+                    prompt_key = lead.get("prompt_config_key", "chess_coach")  # Use lead-specific prompt
+                    asyncio.run(make_outbound_call(lead["phone"], call_type, lead, prompt_key))
                     update_crm(lead["id"], "", {}, {}, "", status="Calling")
-        time.sleep(300)  # Poll every 5 minutes
+        time.sleep(300)
+
+
 # Main entrypoint (updated to include scheduler)
 if __name__ == "__main__":
     import uvicorn

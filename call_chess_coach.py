@@ -18717,10 +18717,10 @@ Your primary purpose is to qualify leads who have shown interest in chess coachi
 Your goal is to qualify chess coaches for Bangalore schools, ensure they understand and are excited about the opportunity, and maintain 4champz’s professional reputation. Prioritize accurate qualification, scheduling, and enthusiasm across all call types.""",
         "initial_message": "Hello {{name}}, this is Priya from 4champz. I’m reaching out due to your interest in chess coaching. Available to discuss?"
     },
-    "default": {
-        "prompt_preamble": "",
-        "initial_message": "Hello, how can I assist you today?"
-    }
+    # "default": {
+    #     "prompt_preamble": "",
+    #     "initial_message": "Hello, how can I assist you today?"
+    # }
 }
 
 # Groq LLM setup
@@ -19499,7 +19499,7 @@ async def outbound_call(req: OutboundCallRequest):
         logger.error(f"/outbound_call failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to process outbound call: {str(e)}")
     
-    
+
 
 
 # Outbound call helper

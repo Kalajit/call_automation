@@ -20985,43 +20985,59 @@ class CustomTelephonyServer(TelephonyServer):
 
     async def connect_call(self, websocket: WebSocket, call_config_id: str, call_sid: str = None):
         logger.debug(f"Connecting WebSocket for call_config_id: {call_config_id}, call_sid: {call_sid}")
-        await websocket.accept()
-        
-        # Try to get call_sid from query parameters first
-        if not call_sid:
-            call_sid = websocket.query_params.get("call_sid")
-            logger.debug(f"Retrieved call_sid from query_params: {call_sid}")
-        
-        # Fallback to scope if query parameter is not available
-        if not call_sid:
-            call_sid = websocket.scope.get("call_sid")
-            logger.debug(f"Retrieved call_sid from scope: {call_sid}")
-        
-        # Check SESSION_TO_CALL_SID as a last resort
-        if not call_sid:
-            call_sid = SESSION_TO_CALL_SID.get(call_config_id)
-            logger.debug(f"Retrieved call_sid from SESSION_TO_CALL_SID: {call_sid}")
-        
-        if not call_sid:
-            logger.error("No call_sid available for WebSocket connection")
-            raise Exception("No call_sid provided for WebSocket connection")
-        
-        logger.debug(f"Using call_sid: {call_sid} as conversation_id")
-        SESSION_TO_CALL_SID[call_config_id] = call_sid
-        
-        # Create conversation with call_sid as conversation_id
-        conversation = await self.create_phone_conversation(
-            call_sid=call_sid,
-            from_phone=websocket.query_params.get("from_phone", websocket.scope.get("from_phone", "")),
-            to_phone=websocket.query_params.get("to_phone", websocket.scope.get("to_phone", "")),
-            base_url=self.base_url,
-            agent_config=self.inbound_call_configs[0].agent_config,
-            transcriber_config=self.inbound_call_configs[0].transcriber_config,
-            synthesizer_config=self.inbound_call_configs[0].synthesizer_config,
-            conversation_id=call_sid
-        )
-        logger.debug(f"Starting conversation with conversation_id: {call_sid}")
-        await conversation.start(websocket, is_outbound=False)
+        try:
+            # Accept WebSocket connection immediately
+            await websocket.accept()
+            logger.debug(f"WebSocket connection accepted for call_config_id: {call_config_id}")
+
+            # Retrieve call_sid from query parameters first
+            if not call_sid:
+                call_sid = websocket.query_params.get("call_sid")
+                logger.debug(f"Retrieved call_sid from query_params: {call_sid}")
+
+            # Fallback to scope
+            if not call_sid:
+                call_sid = websocket.scope.get("call_sid")
+                logger.debug(f"Retrieved call_sid from scope: {call_sid}")
+
+            # Fallback to SESSION_TO_CALL_SID
+            if not call_sid:
+                call_sid = SESSION_TO_CALL_SID.get(call_config_id)
+                logger.debug(f"Retrieved call_sid from SESSION_TO_CALL_SID: {call_sid}")
+
+            if not call_sid:
+                logger.error(f"No call_sid available for WebSocket connection: call_config_id={call_config_id}")
+                await websocket.close(code=1008, reason="No call_sid provided")
+                raise Exception("No call_sid provided for WebSocket connection")
+
+            logger.debug(f"Using call_sid: {call_sid} as conversation_id")
+            SESSION_TO_CALL_SID[call_config_id] = call_sid
+
+            # Retrieve phone numbers from query_params or scope
+            from_phone = websocket.query_params.get("from_phone", websocket.scope.get("from_phone", ""))
+            to_phone = websocket.query_params.get("to_phone", websocket.scope.get("to_phone", ""))
+            logger.debug(f"Phone numbers: from_phone={from_phone}, to_phone={to_phone}")
+
+            # Create conversation
+            conversation = await self.create_phone_conversation(
+                call_sid=call_sid,
+                from_phone=from_phone,
+                to_phone=to_phone,
+                base_url=self.base_url,
+                agent_config=self.inbound_call_configs[0].agent_config,
+                transcriber_config=self.inbound_call_configs[0].transcriber_config,
+                synthesizer_config=self.inbound_call_configs[0].synthesizer_config,
+                conversation_id=call_sid
+            )
+            logger.debug(f"Starting conversation with conversation_id: {call_sid}")
+            await conversation.start(websocket, is_outbound=False)
+        except Exception as e:
+            logger.error(f"Error in connect_call for call_config_id={call_config_id}: {str(e)}")
+            try:
+                await websocket.close(code=1011, reason=f"Server error: {str(e)}")
+            except Exception as close_error:
+                logger.error(f"Failed to close WebSocket: {str(close_error)}")
+            raise
         
 
 

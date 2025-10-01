@@ -20851,6 +20851,9 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
 
 # Custom Agent Factory
 class CustomAgentFactory:
+    def __init__(self, config_manager):
+        self.config_manager = config_manager
+        super().__init__()
     # def create_agent(self, agent_config: AgentConfig, logger: typing.Optional[logging.Logger] = None, conversation_id: typing.Optional[str] = None) -> BaseAgent:
     #     log = logger or globals().get('logger', logging.getLogger(__name__))
     #     log.debug(f"Creating agent with config type: {agent_config.type}, conversation_id: {conversation_id}")
@@ -20876,28 +20879,37 @@ class CustomAgentFactory:
     #     raise Exception(f"Invalid agent config: {agent_config.type}")
 
 
-    def create_agent(self, agent_config: AgentConfig, logger: typing.Optional[logging.Logger] = None, conversation_id: typing.Optional[str] = None) -> BaseAgent:
-        log = logger or globals().get('logger', logging.getLogger(__name__))
+    def create_agent(self, agent_config: AgentConfig, logger: typing.Optional[logging.Logger] = None, conversation_id: typing.Optional[str] = None) -> 'BaseAgent':
+        log = logger or logging.getLogger(__name__)
         log.debug(f"Creating agent with config type: {agent_config.type}, conversation_id: {conversation_id}")
-        
+
         if agent_config.type == "agent_langchain":
+            stored_config = None
+            lead_name = "there"
+            prompt_key = DEFAULT_PROMPT_KEY if DEFAULT_PROMPT_KEY and DEFAULT_PROMPT_KEY in PROMPT_CONFIGS else "chess_coach"
+
             if conversation_id:
+                # Fetch stored config using conversation_id (CallSid)
                 stored_config = config_manager.get_config(f"agent_{conversation_id}")
                 log.debug(f"Checked for stored config with key: agent_{conversation_id}, found: {stored_config is not None}")
+                
                 if stored_config:
-                    log.info(f"Using stored agent config for conversation_id: {conversation_id}, prompt: {stored_config.initial_message.text}")
-                    return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, stored_config))
-            
-            lead = LEAD_CONTEXT_STORE.get(conversation_id, {}).get("lead", {}) if conversation_id else {}
-            lead_name = lead.get("name", "there") if lead else "there"
-            prompt_key = DEFAULT_PROMPT_KEY if DEFAULT_PROMPT_KEY and DEFAULT_PROMPT_KEY in PROMPT_CONFIGS else "chess_coach"
-            log.info(f"No stored config for conversation_id: {conversation_id}, using prompt_key: {prompt_key}, lead_name: {lead_name}")
-            
+                    log.info(f"Using stored agent config for conversation_id: {conversation_id}, prompt: {stored_config.get('initial_message', '')}")
+                    lead = stored_config.get("lead", {})
+                    lead_name = lead.get("name", "there") if lead else "there"
+                    prompt_key = stored_config.get("prompt_config_key", prompt_key)
+                    # Update agent_config with stored values
+                    agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
+                    log.debug(f"Updated agent config with prompt_key: {prompt_key}, initial_message: {agent_config.initial_message.text}")
+                    return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=conversation_id)
+
+            # Fallback if no stored config or conversation_id
+            log.warning(f"No stored config for conversation_id: {conversation_id}, using prompt_key: {prompt_key}, lead_name: {lead_name}")
             agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
             log.debug(f"Created default agent config with prompt_key: {prompt_key}, initial_message: {agent_config.initial_message.text}")
-            return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
-        
-        log.error(f"Invalid agent config type: {agent_config.type}")
+            return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=conversation_id)
+
+        log.warning(f"Invalid agent config type: {agent_config.type}")
         raise Exception(f"Invalid agent config: {agent_config.type}")
 
 
@@ -20933,7 +20945,8 @@ class CustomTelephonyServer(TelephonyServer):
     ):
         logger.debug(f"CustomTelephonyServer.create_phone_conversation called with call_sid: {call_sid}, conversation_id: {conversation_id}")
         # Ensure conversation_id is set to call_sid
-        conversation_id = call_sid if conversation_id is None else conversation_id
+        conversation_id = call_sid
+        logger.debug(f"Set conversation_id to {conversation_id}")
         # Pass call_sid to agent factory
         agent = self.agent_factory.create_agent(
             agent_config=agent_config,
@@ -20941,7 +20954,7 @@ class CustomTelephonyServer(TelephonyServer):
             conversation_id=conversation_id
         )
         # Continue with parent logic
-        return await super().create_phone_conversation(
+        conversation = await super().create_phone_conversation(
             call_sid=call_sid,
             from_phone=from_phone,
             to_phone=to_phone,
@@ -20953,6 +20966,8 @@ class CustomTelephonyServer(TelephonyServer):
             lead=lead,
             **kwargs
         )
+        logger.debug(f"Created conversation with ID: {conversation_id}")
+        return conversation
 
 # FastAPI App
 app = FastAPI()
@@ -21069,7 +21084,8 @@ telephony_server = CustomTelephonyServer(
             status_callback_event=["completed"]
         )
     ],
-    agent_factory=CustomAgentFactory(),
+    # agent_factory=CustomAgentFactory(),
+    agent_factory=CustomAgentFactory(config_manager=config_manager),
     synthesizer_factory=CustomSynthesizerFactory(),
     events_manager=events_manager.EventsManager(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
 )

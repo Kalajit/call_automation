@@ -19674,7 +19674,7 @@ import httpx
 import typing
 import time
 from typing import Optional, Tuple
-from fastapi import FastAPI, Request, Response, WebSocket
+from fastapi import FastAPI, Request, Response
 from fastapi.logger import logger as fastapi_logger
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -19685,7 +19685,7 @@ from vocode.streaming.models.agent import LangchainAgentConfig, AgentConfig
 from vocode.streaming.agent.langchain_agent import LangchainAgent
 from vocode.streaming.models.message import BaseMessage
 from vocode.streaming.transcriber.deepgram_transcriber import DeepgramTranscriber
-from vocode.streaming.models.transcriber import DeepgramTranscriberConfig, AudioEncoding, PunctuationEndpointingConfig, TranscriberConfig
+from vocode.streaming.models.transcriber import DeepgramTranscriberConfig, AudioEncoding, PunctuationEndpointingConfig
 from vocode.streaming.synthesizer.stream_elements_synthesizer import StreamElementsSynthesizer
 from vocode.streaming.models.synthesizer import StreamElementsSynthesizerConfig, SynthesizerConfig
 from vocode.streaming.synthesizer.base_synthesizer import BaseSynthesizer
@@ -19724,9 +19724,6 @@ import requests  # NEW: for CRM API calls
 from pydub import AudioSegment  # NEW: For audio conversion (MP3/WAV)
 import wave  # NEW: For WAV file handling
 import io
-
-from langchain_core.runnables import RunnableSequence
-from twilio.twiml.voice_response import VoiceResponse
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -20254,16 +20251,14 @@ sentiment_prompt = PromptTemplate(
     input_variables=["transcript"],
     template="Analyze the sentiment of this transcript: {transcript}. Return a JSON with 'sentiment' (positive, neutral, negative, angry, confused) and 'tone_score' (1-10, 10 being most positive)."
 )
-# sentiment_chain = LLMChain(llm=llm, prompt=sentiment_prompt)
-sentiment_chain = sentiment_prompt | llm
+sentiment_chain = LLMChain(llm=llm, prompt=sentiment_prompt)
 
 # Summary Generation Chain (using Groq LLM)
 summary_prompt = PromptTemplate(
     input_variables=["transcript"],
     template="Generate a summary of this transcript: {transcript}. Include key points, customer intent, and next actions. Return a JSON with 'summary', 'intent', 'next_actions' (array of strings)."
 )
-# summary_chain = LLMChain(llm=llm, prompt=summary_prompt)
-summary_chain = summary_prompt | llm
+summary_chain = LLMChain(llm=llm, prompt=summary_prompt)
 
 
 
@@ -20355,30 +20350,11 @@ class ChessEventsManager(events_manager.EventsManager):
             transcript = transcript_complete_event.transcript.to_string()
             logger.debug(f"Transcript for conversation {transcript_complete_event.conversation_id}: {transcript}")
 
-            # # NEW: Sentiment analysis
-            # sentiment = await sentiment_chain.ainvoke({"transcript": transcript})
-
-            # # NEW: Summary generation
-            # summary = await summary_chain.ainvoke({"transcript": transcript})
-
-
             # NEW: Sentiment analysis
             sentiment = await sentiment_chain.ainvoke({"transcript": transcript})
-            sentiment = sentiment.content if hasattr(sentiment, 'content') else str(sentiment)
-            try:
-                sentiment = json.loads(sentiment.strip('```json\n').strip('```'))
-            except json.JSONDecodeError:
-                logger.error(f"Failed to parse sentiment JSON: {sentiment}")
-                sentiment = {"sentiment": "unknown", "tone_score": 0}
 
             # NEW: Summary generation
             summary = await summary_chain.ainvoke({"transcript": transcript})
-            summary = summary.content if hasattr(summary, 'content') else str(summary)
-            try:
-                summary = json.loads(summary.strip('```json\n').strip('```'))
-            except json.JSONDecodeError:
-                logger.error(f"Failed to parse summary JSON: {summary}")
-                summary = {"summary": "Error generating summary", "intent": "unknown", "next_actions": []}
 
             # NEW: Recording storage (using Deepgram audio chunks)
             audio_path = await save_recording(transcript_complete_event.conversation_id)
@@ -20457,25 +20433,24 @@ class CustomLangchainAgent(LangchainAgent):
         self.last_response_time = time.time()
         self.conversation_state = "initial"
         self.no_input_count = 0
-        self.user_name = None  # store extracted/confirmed name
-        self.asked_for_name = False  # track if name is requested
+        self.user_name = None
+        self.asked_for_name = False
+        self.turns = []
+        self.extracted_slots = {}
         logger.debug("Initialized CustomLangchainAgent with Groq LLM (llama-3.1-8b-instant)")
-        # ADDED for JSON capture with LLM extraction
-        self.turns = []  # [{"speaker":"user"/"bot","text":..., "ts": epoch_ms}]
-        # self.conversation_id_cache = None  # to index the global store
-        self.extracted_slots = {}  # LLM-extracted structured data
 
-
+        # Initialize CONVERSATION_STORE
         if self.conversation_id_cache not in CONVERSATION_STORE:
+            lead = LEAD_CONTEXT_STORE.get(self.conversation_id_cache, {})
             CONVERSATION_STORE[self.conversation_id_cache] = {
                 "conversation_id": self.conversation_id_cache,
                 "updated_at": int(time.time() * 1000),
-                "lead": LEAD_CONTEXT_STORE.get(self.conversation_id_cache, {}),
+                "lead": lead,
                 "slots": {},
                 "turns": [{"speaker": "bot", "text": agent_config.initial_message.text, "ts": int(time.time() * 1000)}]
             }
             self._flush_to_disk(self.conversation_id_cache)
-        logger.debug(f"Initialized CONVERSATION_STORE for conversation_id: {self.conversation_id_cache}")
+
 
     # ADDED n8n: helper to ensure id
     def _ensure_conv_id(self, conversation_id: Optional[str]) -> str:
@@ -20864,85 +20839,63 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
 
 # Custom Agent Factory
 class CustomAgentFactory:
-    def __init__(self, config_manager):
-        self.config_manager = config_manager
-        # super().__init__()
-    # def create_agent(self, agent_config: AgentConfig, logger: typing.Optional[logging.Logger] = None, conversation_id: typing.Optional[str] = None) -> BaseAgent:
-    #     log = logger or globals().get('logger', logging.getLogger(__name__))
-    #     log.debug(f"Creating agent with config type: {agent_config.type}, conversation_id: {conversation_id}")
-        
-    #     if agent_config.type == "agent_langchain":
-    #         if conversation_id:
-    #             stored_config = config_manager.get_config(f"agent_{conversation_id}")
-    #             if stored_config:
-    #                 log.info(f"Using stored agent config for conversation_id: {conversation_id}, prompt: {stored_config.initial_message.text}")
-    #                 return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, stored_config))
-            
-    #         # For inbound calls without stored config, use DEFAULT_PROMPT_KEY
-    #         lead = LEAD_CONTEXT_STORE.get(conversation_id, {}).get("lead", {}) if conversation_id else {}
-    #         lead_name = lead.get("name", "there") if lead else "there"
-    #         prompt_key = DEFAULT_PROMPT_KEY if DEFAULT_PROMPT_KEY and DEFAULT_PROMPT_KEY in PROMPT_CONFIGS else "chess_coach"
-    #         log.info(f"No stored config for conversation_id: {conversation_id}, using prompt_key: {prompt_key}, lead_name: {lead_name}")
-            
-    #         agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
-    #         log.debug(f"Created default agent config with prompt_key: {prompt_key}, initial_message: {agent_config.initial_message.text}")
-    #         return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
-        
-    #     log.error(f"Invalid agent config type: {agent_config.type}")
-    #     raise Exception(f"Invalid agent config: {agent_config.type}")
-
-
     def create_agent(self, agent_config: AgentConfig, logger: typing.Optional[logging.Logger] = None, conversation_id: typing.Optional[str] = None) -> BaseAgent:
-        log = logger or logging.getLogger(__name__)
+        log = logger or globals().get('logger', logging.getLogger(__name__))
         log.debug(f"Creating agent with config type: {agent_config.type}, conversation_id: {conversation_id}")
-
+        
         if agent_config.type == "agent_langchain":
             prompt_key = DEFAULT_PROMPT_KEY if DEFAULT_PROMPT_KEY and DEFAULT_PROMPT_KEY in PROMPT_CONFIGS else "chess_coach"
-            lead = LEAD_CONTEXT_STORE.get(conversation_id, {}) if conversation_id else {}
-            lead_name = lead.get("name", "there") if lead else "there"
-
+            lead_name = "there"
+            
             if conversation_id:
-                stored_config = self.config_manager.get_config(f"agent_{conversation_id}")
+                stored_config = config_manager.get_config(f"agent_{conversation_id}")
                 if stored_config:
-                    log.info(f"Using stored agent config for conversation_id: {conversation_id}, prompt: {stored_config.get('initial_message', '')}")
+                    log.info(f"Using stored agent config for conversation_id: {conversation_id}, prompt: {stored_config.get('initial_message')}")
                     lead = stored_config.get("lead", {})
-                    lead_name = lead.get("name", "there") if lead else "there"
+                    lead_name = stored_config.get("name", lead.get("name", "there"))  # NEW: Prioritize stored name
                     prompt_key = stored_config.get("prompt_config_key", prompt_key)
                     agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
                     log.debug(f"Updated agent config with prompt_key: {prompt_key}, initial_message: {agent_config.initial_message.text}")
-                    return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=conversation_id)
+                    return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
                 else:
+                    lead = LEAD_CONTEXT_STORE.get(conversation_id, {})
+                    lead_name = lead.get("name", "there")
                     log.warning(f"No stored config for conversation_id: {conversation_id}, using prompt_key: {prompt_key}, lead_name: {lead_name}")
                     agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
-                    self.config_manager.save_config(f"agent_{conversation_id}", {
+                    config_manager.save_config(f"agent_{conversation_id}", {
                         "initial_message": agent_config.initial_message.text,
                         "prompt_preamble": agent_config.prompt_preamble,
                         "model_name": agent_config.model_name,
                         "api_key": agent_config.api_key,
                         "provider": agent_config.provider,
                         "lead": lead,
-                        "prompt_config_key": prompt_key
+                        "prompt_config_key": prompt_key,
+                        "name": lead_name  # NEW: Store name in config
                     })
                     log.debug(f"Saved new agent config for conversation_id: {conversation_id}")
-                    return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=conversation_id)
+                    return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
             else:
                 temp_conversation_id = f"temp_{int(time.time()*1000)}"
-                log.warning(f"No conversation_id provided, using temporary ID: {temp_conversation_id}")
+                lead = LEAD_CONTEXT_STORE.get(temp_conversation_id, {})
+                lead_name = lead.get("name", "there")
+                log.warning(f"No conversation_id provided, using temporary ID: {temp_conversation_id}, lead_name: {lead_name}")
                 agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
-                self.config_manager.save_config(f"agent_{temp_conversation_id}", {
+                config_manager.save_config(f"agent_{temp_conversation_id}", {
                     "initial_message": agent_config.initial_message.text,
                     "prompt_preamble": agent_config.prompt_preamble,
                     "model_name": agent_config.model_name,
                     "api_key": agent_config.api_key,
                     "provider": agent_config.provider,
                     "lead": lead,
-                    "prompt_config_key": prompt_key
+                    "prompt_config_key": prompt_key,
+                    "name": lead_name  # NEW: Store name in config
                 })
                 log.debug(f"Saved new agent config for temporary conversation_id: {temp_conversation_id}")
-                return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=temp_conversation_id)
-
+                return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
+        
         log.error(f"Invalid agent config type: {agent_config.type}")
         raise Exception(f"Invalid agent config: {agent_config.type}")
+
 
 
 
@@ -20955,159 +20908,6 @@ class CustomSynthesizerFactory:
             return StreamElementsSynthesizer(synthesizer_config)
         logger.error(f"Invalid synthesizer config type: {synthesizer_config.type}")
         raise Exception(f"Invalid synthesizer config: {synthesizer_config.type}")
-    
-
-
-class CustomTelephonyServer(TelephonyServer):
-    def __init__(self, base_url: str, config_manager, inbound_call_configs: list, agent_factory, synthesizer_factory, events_manager):
-        super().__init__(
-            base_url=base_url,
-            config_manager=config_manager,
-            inbound_call_configs=inbound_call_configs,
-            agent_factory=agent_factory,
-            synthesizer_factory=synthesizer_factory,
-            events_manager=events_manager
-        )
-        self.agent_factory = agent_factory  # Explicitly set agent_factory
-        logger.debug("Initialized CustomTelephonyServer with agent_factory")
-    async def create_phone_conversation(
-        self,
-        call_sid: str,
-        from_phone: str,
-        to_phone: str,
-        base_url: str,
-        agent_config: AgentConfig,
-        transcriber_config: TranscriberConfig,
-        synthesizer_config: SynthesizerConfig,
-        conversation_id: str = None,
-        lead: Optional[dict] = None,
-        **kwargs
-    ):
-        logger.debug(f"Creating phone conversation with call_sid: {call_sid}, conversation_id: {conversation_id}")
-        # Ensure conversation_id is set to call_sid if not provided
-        if not conversation_id:
-            conversation_id = call_sid
-            logger.debug(f"Set conversation_id to {call_sid} as it was None")
-        
-        if not call_sid:
-            logger.error("No call_sid provided for create_phone_conversation")
-            raise ValueError("call_sid is required for phone conversation")
-
-        # Store lead in LEAD_CONTEXT_STORE for consistency
-        if lead and conversation_id:
-            LEAD_CONTEXT_STORE[conversation_id] = lead
-            logger.debug(f"Stored lead in LEAD_CONTEXT_STORE for conversation_id: {conversation_id}")
-
-        # Create agent with conversation_id
-        try:
-            agent = self.agent_factory.create_agent(
-                agent_config=agent_config,
-                logger=logger,
-                conversation_id=conversation_id
-            )
-        except Exception as e:
-            logger.error(f"Failed to create agent for conversation_id {conversation_id}: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Agent creation failed: {str(e)}")
-
-        # Initialize CONVERSATION_STORE if not already present
-        if conversation_id not in CONVERSATION_STORE:
-            CONVERSATION_STORE[conversation_id] = {
-                "conversation_id": conversation_id,
-                "updated_at": int(time.time() * 1000),
-                "lead": lead or {},
-                "slots": {},
-                "turns": [{"speaker": "bot", "text": agent_config.initial_message.text, "ts": int(time.time() * 1000)}]
-            }
-            logger.debug(f"Initialized CONVERSATION_STORE for conversation_id: {conversation_id}")
-
-        # Call parent method with all parameters
-        conversation = await super().create_phone_conversation(
-            call_sid=call_sid,
-            from_phone=from_phone,
-            to_phone=to_phone,
-            base_url=base_url,
-            agent_config=agent_config,
-            transcriber_config=transcriber_config,
-            synthesizer_config=synthesizer_config,
-            conversation_id=conversation_id,
-            lead=lead,
-            **kwargs
-        )
-        logger.debug(f"Created conversation with ID: {conversation_id}")
-        return conversation
-
-
-
-    async def connect_call(self, websocket: WebSocket, call_config_id: str, call_sid: str = None):
-        logger.debug(f"Connecting WebSocket for call_config_id: {call_config_id}, call_sid: {call_sid}")
-        try:
-            # Accept WebSocket connection immediately
-            await websocket.accept()
-            logger.debug(f"WebSocket connection accepted for call_config_id: {call_config_id}")
-
-            # Retrieve call_sid from query parameters first
-            if not call_sid:
-                call_sid = websocket.query_params.get("call_sid")
-                logger.debug(f"Retrieved call_sid from query_params: {call_sid}")
-
-            # Fallback to scope
-            if not call_sid:
-                call_sid = websocket.scope.get("call_sid")
-                logger.debug(f"Retrieved call_sid from scope: {call_sid}")
-
-            # Fallback to SESSION_TO_CALL_SID
-            if not call_sid:
-                call_sid = SESSION_TO_CALL_SID.get(call_config_id)
-                logger.debug(f"Retrieved call_sid from SESSION_TO_CALL_SID: {call_sid}")
-
-            if not call_sid:
-                call_sid = f"temp_{int(time.time()*1000)}"
-                logger.warning(f"No call_sid available, using temporary ID: {call_sid}")
-
-            # Store call_sid in SESSION_TO_CALL_SID
-            SESSION_TO_CALL_SID[call_config_id] = call_sid
-            logger.debug(f"Stored call_sid: {call_sid} in SESSION_TO_CALL_SID for call_config_id: {call_config_id}")
-
-            logger.debug(f"Using call_sid: {call_sid} as conversation_id")
-
-            # Retrieve phone numbers from query_params or scope
-            from_phone = websocket.query_params.get("from_phone", websocket.scope.get("from_phone", ""))
-            to_phone = websocket.query_params.get("to_phone", websocket.scope.get("to_phone", ""))
-            logger.debug(f"Phone numbers: from_phone={from_phone}, to_phone={to_phone}")
-
-            # Create conversation using the agent_factory
-            conversation = await self.create_phone_conversation(
-                call_sid=call_sid,
-                from_phone=from_phone,
-                to_phone=to_phone,
-                base_url=self.base_url,
-                agent_config=self.inbound_call_configs[0].agent_config,
-                transcriber_config=self.inbound_call_configs[0].transcriber_config,
-                synthesizer_config=self.inbound_call_configs[0].synthesizer_config,
-                conversation_id=call_sid
-            )
-            logger.debug(f"Starting conversation with conversation_id: {call_sid}")
-            await conversation.start(websocket, is_outbound=False)
-        except Exception as e:
-            logger.error(f"Error in connect_call for call_config_id={call_config_id}: {str(e)}")
-            try:
-                await websocket.close(code=1011, reason=f"Server error: {str(e)}")
-            except Exception as close_error:
-                logger.error(f"Failed to close WebSocket: {str(close_error)}")
-            raise
-
-    # async def create_phone_conversation(self, call_sid: str, from_phone: str, to_phone: str, base_url: str, 
-    #                                    agent_config: AgentConfig, transcriber_config, synthesizer_config, 
-    #                                    conversation_id: str, lead: dict = None):
-    #     logger.debug(f"Creating phone conversation with call_sid: {call_sid}, conversation_id: {conversation_id}")
-    #     # Use agent_factory to create the agent
-    #     agent = self.agent_factory.create_agent(agent_config=agent_config, conversation_id=conversation_id)
-    #     # Rest of the conversation creation logic remains the same
-    #     # ... (implement as per your existing logic)
-    #     return conversation
-        
-
-
 
 # FastAPI App
 app = FastAPI()
@@ -21172,37 +20972,7 @@ def get_default_agent_config(prompt_key: str = None, lead_name: str = "there") -
 
 
 # Telephony Server setup
-# telephony_server = TelephonyServer(
-#     base_url=BASE_URL,
-#     config_manager=config_manager,
-#     inbound_call_configs=[
-#         TwilioInboundCallConfig(
-#             url="/inbound_call",
-#             twilio_config=twilio_config,
-#             agent_config=get_default_agent_config(),
-#             synthesizer_config=synthesizer_config,
-#             transcriber_config=transcriber_config,
-#             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
-# <Response>
-#     <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
-#     <Pause length="15"/>
-#     <Redirect method="POST">/inbound_call</Redirect>
-# </Response>''',
-#             record=True,
-#             status_callback=f"https://{BASE_URL}/call_status",
-#             status_callback_method="POST",
-#             status_callback_event=["completed"]
-#         )
-#     ],
-#     agent_factory=CustomAgentFactory(),
-#     synthesizer_factory=CustomSynthesizerFactory(),
-#     events_manager=events_manager.EventsManager(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
-# )
-
-
-
-
-telephony_server = CustomTelephonyServer(
+telephony_server = TelephonyServer(
     base_url=BASE_URL,
     config_manager=config_manager,
     inbound_call_configs=[
@@ -21224,14 +20994,10 @@ telephony_server = CustomTelephonyServer(
             status_callback_event=["completed"]
         )
     ],
-    # agent_factory=CustomAgentFactory(),
-    agent_factory=CustomAgentFactory(config_manager=config_manager),
+    agent_factory=CustomAgentFactory(),
     synthesizer_factory=CustomSynthesizerFactory(),
     events_manager=events_manager.EventsManager(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
 )
-
-
-
 
 # Add routes to FastAPI app
 app.include_router(telephony_server.get_router())
@@ -21266,6 +21032,7 @@ async def get_conversation(call_sid: str):
 # ADDED n8n: request schema for outbound_call
 class OutboundCallRequest(BaseModel):
     to_phone: str
+    name: str  # NEW: Required field for client's name
     lead: typing.Optional[typing.Dict[str, typing.Any]] = None
     transcript_callback_url: typing.Optional[str] = None
     call_type: str = "qualification"
@@ -21300,11 +21067,12 @@ async def outbound_call(req: OutboundCallRequest):
             raise HTTPException(status_code=400, detail="Invalid phone number format")
         sid = await make_outbound_call(
             to_phone=to_phone,
+            name=req.name,  # NEW: Pass name explicitly
             call_type=req.call_type,
             lead=req.lead,
             prompt_config_key=req.prompt_config_key
         )
-        logger.info(f"Outbound call initiated: SID={sid}, lead={req.lead}, prompt_config_key={req.prompt_config_key}")
+        logger.info(f"Outbound call initiated: SID={sid}, name={req.name}, lead={req.lead}, prompt_config_key={req.prompt_config_key}")
         if req.transcript_callback_url:
             os.environ["TRANSCRIPT_CALLBACK_URL"] = req.transcript_callback_url
             logger.debug(f"Set TRANSCRIPT_CALLBACK_URL to {req.transcript_callback_url}")
@@ -21321,7 +21089,7 @@ async def outbound_call(req: OutboundCallRequest):
 
 
 # Outbound call helper
-async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, prompt_config_key: str = None):
+async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dict = None, prompt_config_key: str = None):
     try:
         if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, BASE_URL]):
             logger.error("Missing required Twilio environment variables")
@@ -21334,10 +21102,8 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
             logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Falling back to 'chess_coach'")
             prompt_config_key = "chess_coach"
         prompt_config = PROMPT_CONFIGS[prompt_config_key]
-        lead = lead or {}
-        lead_name = lead.get("name", "there")
-        initial_message = prompt_config["initial_message"].replace("{{name}}", lead_name)
-        logger.debug(f"Using prompt_config_key: {prompt_config_key}, initial_message: {initial_message}")
+        initial_message = prompt_config["initial_message"].replace("{{name}}", name or "there")
+        logger.debug(f"Using prompt_config_key: {prompt_config_key}, name: {name}, initial_message: {initial_message}")
         
         if call_type == "reminder":
             initial_message = f"This is a reminder for your demo on {lead.get('demo_date', time.strftime('%Y-%m-%d %H:%M IST', time.localtime(time.time() + 86400)))}. Ready?"
@@ -21374,19 +21140,20 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
             raise HTTPException(status_code=500, detail=f"Twilio API error: {str(twilio_error)}")
         
         call_sid = call.sid
-        # Save agent config with lead and prompt details
         await config_manager.save_config(f"agent_{call_sid}", {
             "initial_message": agent_config.initial_message.text,
             "prompt_preamble": agent_config.prompt_preamble,
             "model_name": agent_config.model_name,
             "api_key": agent_config.api_key,
             "provider": agent_config.provider,
-            "lead": lead,
-            "prompt_config_key": prompt_config_key
+            "lead": lead or {},
+            "prompt_config_key": prompt_config_key,
+            "name": name  # NEW: Store name in config
         })
-        logger.info(f"Saved agent config for CallSid: {call_sid}, prompt_config_key: {prompt_config_key}")
+        logger.info(f"Saved agent config for CallSid: {call_sid}, prompt_config_key: {prompt_config_key}, name: {name}")
         
-        lead.update({"to_phone": to_phone, "call_type": call_type, "prompt_config_key": prompt_config_key})
+        lead = lead or {}
+        lead.update({"to_phone": to_phone, "call_type": call_type, "prompt_config_key": prompt_config_key, "name": name})
         LEAD_CONTEXT_STORE[call_sid] = lead
         CONVERSATION_STORE[call_sid] = {
             "conversation_id": call_sid,
@@ -21396,57 +21163,11 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
             "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time() * 1000)}]
         }
         logger.debug(f"Updated LEAD_CONTEXT_STORE and CONVERSATION_STORE for CallSid: {call_sid}")
-
-        # Create conversation with explicit conversation_id
-        conversation = await telephony_server.create_phone_conversation(
-            call_sid=call_sid,
-            from_phone=TWILIO_PHONE_NUMBER,
-            to_phone=to_phone,
-            base_url=twilio_base_url,
-            agent_config=agent_config,
-            transcriber_config=transcriber_config,
-            synthesizer_config=synthesizer_config,
-            conversation_id=call_sid,
-            lead=lead
-        )
-        logger.debug(f"Created conversation with CallSid: {call_sid}, conversation_id: {call_sid}")
-
+        
         return call_sid
     except Exception as e:
         logger.error(f"make_outbound_call failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to initiate call: {str(e)}")
-
-
-
-@app.post("/inbound_call")
-async def inbound_call(request: Request) -> str:
-    try:
-        logger.debug("Handling inbound call request")
-        form = await request.form()
-        call_sid = form.get("CallSid")
-        logger.debug(f"Received CallSid: {call_sid}")
-        
-        if not call_sid:
-            logger.error("No CallSid provided in inbound call request")
-            raise HTTPException(status_code=400, detail="CallSid is required")
-
-        # Generate unique call_config_id
-        call_config_id = f"inbound_{call_sid}"
-        logger.debug(f"Generated call_config_id: {call_config_id}")
-
-        # Create TwiML response
-        response = VoiceResponse()
-        connect = response.connect()
-        # Include call_sid in WebSocket URL as query parameter
-        stream = connect.stream(url=f"wss://{BASE_URL}/connect_call/{call_config_id}?call_sid={call_sid}")
-        stream.parameter(name="from_phone", value=form.get("From", ""))
-        stream.parameter(name="to_phone", value=form.get("To", ""))
-        logger.debug(f"Generated TwiML: {str(response)}")
-        return str(response)
-    except Exception as e:
-        logger.error(f"Error in inbound_call: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to process inbound call: {str(e)}")
-
 
 
 
@@ -21461,11 +21182,18 @@ def outbound_scheduler():
                 if lead.get("status") == "Call Pending":
                     call_type = lead.get("call_type", "qualification")
                     prompt_key = lead.get("prompt_config_key")
+                    name = lead.get("name", "there")  # NEW: Extract name from lead
                     if not prompt_key or prompt_key not in PROMPT_CONFIGS:
                         logger.error(f"Invalid prompt_config_key in lead: {prompt_key}, falling back to 'chess_coach'")
                         prompt_key = "chess_coach"
-                    logger.info(f"Scheduling outbound call for lead: {lead.get('id')}, prompt_key: {prompt_key}")
-                    asyncio.run(make_outbound_call(lead["phone"], call_type, lead, prompt_key))
+                    logger.info(f"Scheduling outbound call for lead: {lead.get('id')}, name: {name}, prompt_key: {prompt_key}")
+                    asyncio.run(make_outbound_call(
+                        to_phone=lead["phone"],
+                        name=name,  # NEW: Pass name explicitly
+                        call_type=call_type,
+                        lead=lead,
+                        prompt_key=prompt_key
+                    ))
                     update_crm(lead["id"], "", {}, {}, "", status="Calling")
         time.sleep(300)
 

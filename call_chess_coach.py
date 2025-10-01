@@ -20449,9 +20449,10 @@ class CustomLangchainAgentConfig(LangchainAgentConfig, type="agent_langchain"):
 
 # Custom Langchain Agent
 class CustomLangchainAgent(LangchainAgent):
-    def __init__(self, agent_config: CustomLangchainAgentConfig):
-        logger.debug(f"Initializing CustomLangchainAgent with config: {agent_config}")
+    def __init__(self, agent_config: CustomLangchainAgentConfig, conversation_id: Optional[str] = None):
+        logger.debug(f"Initializing CustomLangchainAgent with config: {agent_config}, conversation_id: {conversation_id}")
         super().__init__(agent_config=agent_config)
+        self.conversation_id_cache = conversation_id
         self.last_response_time = time.time()
         self.conversation_state = "initial"
         self.no_input_count = 0
@@ -20460,7 +20461,7 @@ class CustomLangchainAgent(LangchainAgent):
         logger.debug("Initialized CustomLangchainAgent with Groq LLM (llama-3.1-8b-instant)")
         # ADDED for JSON capture with LLM extraction
         self.turns = []  # [{"speaker":"user"/"bot","text":..., "ts": epoch_ms}]
-        self.conversation_id_cache = None  # to index the global store
+        # self.conversation_id_cache = None  # to index the global store
         self.extracted_slots = {}  # LLM-extracted structured data
 
 
@@ -20968,6 +20969,34 @@ class CustomTelephonyServer(TelephonyServer):
         )
         logger.debug(f"Created conversation with ID: {conversation_id}")
         return conversation
+
+
+
+    async def connect_call(self, websocket: WebSocket, call_config_id: str, call_sid: str = None):
+        logger.debug(f"Connecting WebSocket for call_config_id: {call_config_id}, call_sid: {call_sid}")
+        if not call_sid:
+            logger.warning("No call_sid provided in WebSocket connection; attempting to retrieve from scope")
+            call_sid = websocket.scope.get("call_sid", None)
+        if call_sid:
+            logger.debug(f"Using call_sid: {call_sid} as conversation_id")
+            SESSION_TO_CALL_SID[call_config_id] = call_sid
+            conversation = await self.create_phone_conversation(
+                call_sid=call_sid,
+                from_phone=websocket.scope.get("from_phone", ""),
+                to_phone=websocket.scope.get("to_phone", ""),
+                base_url=self.base_url,
+                agent_config=self.inbound_call_configs[0].agent_config,
+                transcriber_config=self.inbound_call_configs[0].transcriber_config,
+                synthesizer_config=self.inbound_call_configs[0].synthesizer_config,
+                conversation_id=call_sid
+            )
+            await conversation.start(websocket, is_outbound=False)
+        else:
+            logger.error("No call_sid available for WebSocket connection")
+            raise Exception("No call_sid provided for WebSocket connection")
+        
+
+
 
 # FastAPI App
 app = FastAPI()

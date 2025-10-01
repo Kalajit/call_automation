@@ -20469,14 +20469,13 @@ class CustomLangchainAgent(LangchainAgent):
         if self.conversation_id_cache not in CONVERSATION_STORE:
             CONVERSATION_STORE[self.conversation_id_cache] = {
                 "conversation_id": self.conversation_id_cache,
-                "updated_at": int(time.time()*1000),
+                "updated_at": int(time.time() * 1000),
                 "lead": LEAD_CONTEXT_STORE.get(self.conversation_id_cache, {}),
                 "slots": {},
-                "turns": []
+                "turns": [{"speaker": "bot", "text": agent_config.initial_message.text, "ts": int(time.time() * 1000)}]
             }
             self._flush_to_disk(self.conversation_id_cache)
         logger.debug(f"Initialized CONVERSATION_STORE for conversation_id: {self.conversation_id_cache}")
-
 
     # ADDED n8n: helper to ensure id
     def _ensure_conv_id(self, conversation_id: Optional[str]) -> str:
@@ -20867,7 +20866,7 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
 class CustomAgentFactory:
     def __init__(self, config_manager):
         self.config_manager = config_manager
-        super().__init__()
+        # super().__init__()
     # def create_agent(self, agent_config: AgentConfig, logger: typing.Optional[logging.Logger] = None, conversation_id: typing.Optional[str] = None) -> BaseAgent:
     #     log = logger or globals().get('logger', logging.getLogger(__name__))
     #     log.debug(f"Creating agent with config type: {agent_config.type}, conversation_id: {conversation_id}")
@@ -20893,52 +20892,56 @@ class CustomAgentFactory:
     #     raise Exception(f"Invalid agent config: {agent_config.type}")
 
 
-    def create_agent(self, agent_config: AgentConfig, logger: typing.Optional[logging.Logger] = None, conversation_id: typing.Optional[str] = None) -> 'BaseAgent':
+    def create_agent(self, agent_config: AgentConfig, logger: typing.Optional[logging.Logger] = None, conversation_id: typing.Optional[str] = None) -> BaseAgent:
         log = logger or logging.getLogger(__name__)
         log.debug(f"Creating agent with config type: {agent_config.type}, conversation_id: {conversation_id}")
 
         if agent_config.type == "agent_langchain":
-            stored_config = None
-            lead_name = "there"
             prompt_key = DEFAULT_PROMPT_KEY if DEFAULT_PROMPT_KEY and DEFAULT_PROMPT_KEY in PROMPT_CONFIGS else "chess_coach"
+            lead = LEAD_CONTEXT_STORE.get(conversation_id, {}) if conversation_id else {}
+            lead_name = lead.get("name", "there") if lead else "there"
 
             if conversation_id:
-                # Use conversation_id as call_sid
                 stored_config = self.config_manager.get_config(f"agent_{conversation_id}")
-                log.debug(f"Checked for stored config with key: agent_{conversation_id}, found: {stored_config is not None}")
-                
                 if stored_config:
                     log.info(f"Using stored agent config for conversation_id: {conversation_id}, prompt: {stored_config.get('initial_message', '')}")
                     lead = stored_config.get("lead", {})
                     lead_name = lead.get("name", "there") if lead else "there"
                     prompt_key = stored_config.get("prompt_config_key", prompt_key)
-                    # Update agent_config with stored values
                     agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
                     log.debug(f"Updated agent config with prompt_key: {prompt_key}, initial_message: {agent_config.initial_message.text}")
                     return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=conversation_id)
                 else:
-                    # Fallback: create new config if none stored
                     log.warning(f"No stored config for conversation_id: {conversation_id}, using prompt_key: {prompt_key}, lead_name: {lead_name}")
-                    lead = LEAD_CONTEXT_STORE.get(conversation_id, {})
-                    lead_name = lead.get("name", "there") if lead else "there"
                     agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
-                    log.debug(f"Created default agent config with prompt_key: {prompt_key}, initial_message: {agent_config.initial_message.text}")
-                    # Save the new config
-                    self.config_manager.save_config(f"agent_{conversation_id}", agent_config)
+                    self.config_manager.save_config(f"agent_{conversation_id}", {
+                        "initial_message": agent_config.initial_message.text,
+                        "prompt_preamble": agent_config.prompt_preamble,
+                        "model_name": agent_config.model_name,
+                        "api_key": agent_config.api_key,
+                        "provider": agent_config.provider,
+                        "lead": lead,
+                        "prompt_config_key": prompt_key
+                    })
+                    log.debug(f"Saved new agent config for conversation_id: {conversation_id}")
                     return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=conversation_id)
             else:
-                # Generate a temporary conversation_id if none provided
                 temp_conversation_id = f"temp_{int(time.time()*1000)}"
                 log.warning(f"No conversation_id provided, using temporary ID: {temp_conversation_id}")
-                lead = LEAD_CONTEXT_STORE.get(temp_conversation_id, {})
-                lead_name = lead.get("name", "there") if lead else "there"
                 agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
-                log.debug(f"Created default agent config with prompt_key: {prompt_key}, initial_message: {agent_config.initial_message.text}")
-                # Save the config with temp_conversation_id
-                self.config_manager.save_config(f"agent_{temp_conversation_id}", agent_config)
+                self.config_manager.save_config(f"agent_{temp_conversation_id}", {
+                    "initial_message": agent_config.initial_message.text,
+                    "prompt_preamble": agent_config.prompt_preamble,
+                    "model_name": agent_config.model_name,
+                    "api_key": agent_config.api_key,
+                    "provider": agent_config.provider,
+                    "lead": lead,
+                    "prompt_config_key": prompt_key
+                })
+                log.debug(f"Saved new agent config for temporary conversation_id: {temp_conversation_id}")
                 return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=temp_conversation_id)
 
-        log.warning(f"Invalid agent config type: {agent_config.type}")
+        log.error(f"Invalid agent config type: {agent_config.type}")
         raise Exception(f"Invalid agent config: {agent_config.type}")
 
 
@@ -20956,9 +20959,17 @@ class CustomSynthesizerFactory:
 
 
 class CustomTelephonyServer(TelephonyServer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
+    def __init__(self, base_url: str, config_manager, inbound_call_configs: list, agent_factory, synthesizer_factory, events_manager):
+        super().__init__(
+            base_url=base_url,
+            config_manager=config_manager,
+            inbound_call_configs=inbound_call_configs,
+            agent_factory=agent_factory,
+            synthesizer_factory=synthesizer_factory,
+            events_manager=events_manager
+        )
+        self.agent_factory = agent_factory  # Explicitly set agent_factory
+        logger.debug("Initialized CustomTelephonyServer with agent_factory")
     async def create_phone_conversation(
         self,
         call_sid: str,
@@ -20972,27 +20983,44 @@ class CustomTelephonyServer(TelephonyServer):
         lead: Optional[dict] = None,
         **kwargs
     ):
-        logger.debug(f"CustomTelephonyServer.create_phone_conversation called with call_sid: {call_sid}, conversation_id: {conversation_id}")
-        # Ensure conversation_id is set to call_sid
+        logger.debug(f"Creating phone conversation with call_sid: {call_sid}, conversation_id: {conversation_id}")
+        # Ensure conversation_id is set to call_sid if not provided
         if not conversation_id:
             conversation_id = call_sid
             logger.debug(f"Set conversation_id to {call_sid} as it was None")
-        else:
-            logger.debug(f"Using provided conversation_id: {conversation_id}")
-        logger.debug(f"Set conversation_id to {conversation_id}")
-
-
-        # Validate call_sid
+        
         if not call_sid:
             logger.error("No call_sid provided for create_phone_conversation")
             raise ValueError("call_sid is required for phone conversation")
-        # Pass call_sid to agent factory
-        agent = self.agent_factory.create_agent(
-            agent_config=agent_config,
-            logger=logger,
-            conversation_id=conversation_id
-        )
-        # Continue with parent logic
+
+        # Store lead in LEAD_CONTEXT_STORE for consistency
+        if lead and conversation_id:
+            LEAD_CONTEXT_STORE[conversation_id] = lead
+            logger.debug(f"Stored lead in LEAD_CONTEXT_STORE for conversation_id: {conversation_id}")
+
+        # Create agent with conversation_id
+        try:
+            agent = self.agent_factory.create_agent(
+                agent_config=agent_config,
+                logger=logger,
+                conversation_id=conversation_id
+            )
+        except Exception as e:
+            logger.error(f"Failed to create agent for conversation_id {conversation_id}: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Agent creation failed: {str(e)}")
+
+        # Initialize CONVERSATION_STORE if not already present
+        if conversation_id not in CONVERSATION_STORE:
+            CONVERSATION_STORE[conversation_id] = {
+                "conversation_id": conversation_id,
+                "updated_at": int(time.time() * 1000),
+                "lead": lead or {},
+                "slots": {},
+                "turns": [{"speaker": "bot", "text": agent_config.initial_message.text, "ts": int(time.time() * 1000)}]
+            }
+            logger.debug(f"Initialized CONVERSATION_STORE for conversation_id: {conversation_id}")
+
+        # Call parent method with all parameters
         conversation = await super().create_phone_conversation(
             call_sid=call_sid,
             from_phone=from_phone,
@@ -21036,16 +21064,18 @@ class CustomTelephonyServer(TelephonyServer):
                 call_sid = f"temp_{int(time.time()*1000)}"
                 logger.warning(f"No call_sid available, using temporary ID: {call_sid}")
 
+            # Store call_sid in SESSION_TO_CALL_SID
+            SESSION_TO_CALL_SID[call_config_id] = call_sid
+            logger.debug(f"Stored call_sid: {call_sid} in SESSION_TO_CALL_SID for call_config_id: {call_config_id}")
 
             logger.debug(f"Using call_sid: {call_sid} as conversation_id")
-            SESSION_TO_CALL_SID[call_config_id] = call_sid
 
             # Retrieve phone numbers from query_params or scope
             from_phone = websocket.query_params.get("from_phone", websocket.scope.get("from_phone", ""))
             to_phone = websocket.query_params.get("to_phone", websocket.scope.get("to_phone", ""))
             logger.debug(f"Phone numbers: from_phone={from_phone}, to_phone={to_phone}")
 
-            # Create conversation
+            # Create conversation using the agent_factory
             conversation = await self.create_phone_conversation(
                 call_sid=call_sid,
                 from_phone=from_phone,
@@ -21065,6 +21095,16 @@ class CustomTelephonyServer(TelephonyServer):
             except Exception as close_error:
                 logger.error(f"Failed to close WebSocket: {str(close_error)}")
             raise
+
+    # async def create_phone_conversation(self, call_sid: str, from_phone: str, to_phone: str, base_url: str, 
+    #                                    agent_config: AgentConfig, transcriber_config, synthesizer_config, 
+    #                                    conversation_id: str, lead: dict = None):
+    #     logger.debug(f"Creating phone conversation with call_sid: {call_sid}, conversation_id: {conversation_id}")
+    #     # Use agent_factory to create the agent
+    #     agent = self.agent_factory.create_agent(agent_config=agent_config, conversation_id=conversation_id)
+    #     # Rest of the conversation creation logic remains the same
+    #     # ... (implement as per your existing logic)
+    #     return conversation
         
 
 
@@ -21294,10 +21334,11 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
             logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Falling back to 'chess_coach'")
             prompt_config_key = "chess_coach"
         prompt_config = PROMPT_CONFIGS[prompt_config_key]
-        initial_message = prompt_config["initial_message"].replace(
-            "{{name}}", lead.get("name", "there") if lead else "there"
-        )
+        lead = lead or {}
+        lead_name = lead.get("name", "there")
+        initial_message = prompt_config["initial_message"].replace("{{name}}", lead_name)
         logger.debug(f"Using prompt_config_key: {prompt_config_key}, initial_message: {initial_message}")
+        
         if call_type == "reminder":
             initial_message = f"This is a reminder for your demo on {lead.get('demo_date', time.strftime('%Y-%m-%d %H:%M IST', time.localtime(time.time() + 86400)))}. Ready?"
         elif call_type == "payment":
@@ -21333,22 +21374,30 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
             raise HTTPException(status_code=500, detail=f"Twilio API error: {str(twilio_error)}")
         
         call_sid = call.sid
-        await config_manager.save_config(f"agent_{call_sid}", agent_config)
+        # Save agent config with lead and prompt details
+        await config_manager.save_config(f"agent_{call_sid}", {
+            "initial_message": agent_config.initial_message.text,
+            "prompt_preamble": agent_config.prompt_preamble,
+            "model_name": agent_config.model_name,
+            "api_key": agent_config.api_key,
+            "provider": agent_config.provider,
+            "lead": lead,
+            "prompt_config_key": prompt_config_key
+        })
         logger.info(f"Saved agent config for CallSid: {call_sid}, prompt_config_key: {prompt_config_key}")
         
-        lead = lead or {}
         lead.update({"to_phone": to_phone, "call_type": call_type, "prompt_config_key": prompt_config_key})
         LEAD_CONTEXT_STORE[call_sid] = lead
-        CONVERSATION_STORE.setdefault(call_sid, {
+        CONVERSATION_STORE[call_sid] = {
             "conversation_id": call_sid,
-            "updated_at": int(time.time()*1000),
+            "updated_at": int(time.time() * 1000),
             "lead": lead,
             "slots": {},
-            "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time()*1000)}]
-        })
+            "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time() * 1000)}]
+        }
         logger.debug(f"Updated LEAD_CONTEXT_STORE and CONVERSATION_STORE for CallSid: {call_sid}")
 
-        # Explicitly create the conversation with call_sid as conversation_id
+        # Create conversation with explicit conversation_id
         conversation = await telephony_server.create_phone_conversation(
             call_sid=call_sid,
             from_phone=TWILIO_PHONE_NUMBER,
@@ -21357,7 +21406,7 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
             agent_config=agent_config,
             transcriber_config=transcriber_config,
             synthesizer_config=synthesizer_config,
-            conversation_id=call_sid,  # Explicitly set conversation_id
+            conversation_id=call_sid,
             lead=lead
         )
         logger.debug(f"Created conversation with CallSid: {call_sid}, conversation_id: {call_sid}")

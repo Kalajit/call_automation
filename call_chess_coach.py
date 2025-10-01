@@ -21358,6 +21358,38 @@ async def make_outbound_call(to_phone: str, call_type: str, lead: dict = None, p
 
 
 
+@app.post("/inbound_call")
+async def inbound_call(request: Request) -> str:
+    try:
+        logger.debug("Handling inbound call request")
+        form = await request.form()
+        call_sid = form.get("CallSid")
+        logger.debug(f"Received CallSid: {call_sid}")
+        
+        if not call_sid:
+            logger.error("No CallSid provided in inbound call request")
+            raise HTTPException(status_code=400, detail="CallSid is required")
+
+        # Generate unique call_config_id
+        call_config_id = f"inbound_{call_sid}"
+        logger.debug(f"Generated call_config_id: {call_config_id}")
+
+        # Create TwiML response
+        response = VoiceResponse()
+        connect = response.connect()
+        # Include call_sid in WebSocket URL as query parameter
+        stream = connect.stream(url=f"wss://{BASE_URL}/connect_call/{call_config_id}?call_sid={call_sid}")
+        stream.parameter(name="from_phone", value=form.get("From", ""))
+        stream.parameter(name="to_phone", value=form.get("To", ""))
+        logger.debug(f"Generated TwiML: {str(response)}")
+        return str(response)
+    except Exception as e:
+        logger.error(f"Error in inbound_call: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process inbound call: {str(e)}")
+
+
+
+
 
 # NEW: Outbound Call Scheduler (for auto-dialing from CRM)
 def outbound_scheduler():

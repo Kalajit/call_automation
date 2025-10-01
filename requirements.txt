@@ -14,3 +14,4 @@ vocode[stream_elements]>=0.1.113,<0.2.0  # Added for StreamElementsSynthesizer
 
 pydub>=0.25.1,<0.26.0
 
+langchain-core>=0.3.10

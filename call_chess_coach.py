@@ -19685,7 +19685,7 @@ from vocode.streaming.models.agent import LangchainAgentConfig, AgentConfig
 from vocode.streaming.agent.langchain_agent import LangchainAgent
 from vocode.streaming.models.message import BaseMessage
 from vocode.streaming.transcriber.deepgram_transcriber import DeepgramTranscriber
-from vocode.streaming.models.transcriber import DeepgramTranscriberConfig, AudioEncoding, PunctuationEndpointingConfig
+from vocode.streaming.models.transcriber import DeepgramTranscriberConfig, AudioEncoding, PunctuationEndpointingConfig, TranscriberConfig
 from vocode.streaming.synthesizer.stream_elements_synthesizer import StreamElementsSynthesizer
 from vocode.streaming.models.synthesizer import StreamElementsSynthesizerConfig, SynthesizerConfig
 from vocode.streaming.synthesizer.base_synthesizer import BaseSynthesizer
@@ -20911,6 +20911,48 @@ class CustomSynthesizerFactory:
             return StreamElementsSynthesizer(synthesizer_config)
         logger.error(f"Invalid synthesizer config type: {synthesizer_config.type}")
         raise Exception(f"Invalid synthesizer config: {synthesizer_config.type}")
+    
+
+
+class CustomTelephonyServer(TelephonyServer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    async def create_phone_conversation(
+        self,
+        call_sid: str,
+        from_phone: str,
+        to_phone: str,
+        base_url: str,
+        agent_config: AgentConfig,
+        transcriber_config: TranscriberConfig,
+        synthesizer_config: SynthesizerConfig,
+        conversation_id: str = None,
+        lead: Optional[dict] = None,
+        **kwargs
+    ):
+        logger.debug(f"CustomTelephonyServer.create_phone_conversation called with call_sid: {call_sid}, conversation_id: {conversation_id}")
+        # Ensure conversation_id is set to call_sid
+        conversation_id = call_sid if conversation_id is None else conversation_id
+        # Pass call_sid to agent factory
+        agent = self.agent_factory.create_agent(
+            agent_config=agent_config,
+            logger=logger,
+            conversation_id=conversation_id
+        )
+        # Continue with parent logic
+        return await super().create_phone_conversation(
+            call_sid=call_sid,
+            from_phone=from_phone,
+            to_phone=to_phone,
+            base_url=base_url,
+            agent_config=agent_config,
+            transcriber_config=transcriber_config,
+            synthesizer_config=synthesizer_config,
+            conversation_id=conversation_id,
+            lead=lead,
+            **kwargs
+        )
 
 # FastAPI App
 app = FastAPI()
@@ -20975,7 +21017,37 @@ def get_default_agent_config(prompt_key: str = None, lead_name: str = "there") -
 
 
 # Telephony Server setup
-telephony_server = TelephonyServer(
+# telephony_server = TelephonyServer(
+#     base_url=BASE_URL,
+#     config_manager=config_manager,
+#     inbound_call_configs=[
+#         TwilioInboundCallConfig(
+#             url="/inbound_call",
+#             twilio_config=twilio_config,
+#             agent_config=get_default_agent_config(),
+#             synthesizer_config=synthesizer_config,
+#             transcriber_config=transcriber_config,
+#             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
+# <Response>
+#     <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
+#     <Pause length="15"/>
+#     <Redirect method="POST">/inbound_call</Redirect>
+# </Response>''',
+#             record=True,
+#             status_callback=f"https://{BASE_URL}/call_status",
+#             status_callback_method="POST",
+#             status_callback_event=["completed"]
+#         )
+#     ],
+#     agent_factory=CustomAgentFactory(),
+#     synthesizer_factory=CustomSynthesizerFactory(),
+#     events_manager=events_manager.EventsManager(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
+# )
+
+
+
+
+telephony_server = CustomTelephonyServer(
     base_url=BASE_URL,
     config_manager=config_manager,
     inbound_call_configs=[
@@ -21004,30 +21076,8 @@ telephony_server = TelephonyServer(
 
 
 
-# Override WebSocket route to capture CallSid
-@app.websocket("/connect_call/{id}")
-async def websocket_connect_call(websocket: WebSocket, id: str):
-    await websocket.accept()
-    try:
-        # Receive initial Twilio data
-        initial_data = await websocket.receive_text()
-        form_data = dict(x.split('=') for x in initial_data.split('&') if '=' in x)
-        call_sid = form_data.get('CallSid')
-        if call_sid:
-            SESSION_TO_CALL_SID[id] = call_sid
-            logger.debug(f"Mapped WebSocket session {id} to CallSid {call_sid}")
-        else:
-            logger.warning(f"No CallSid found in WebSocket initial data for session {id}")
 
-        # Call the original TelephonyServer handler
-        await telephony_server.handle_websocket(id, websocket)
-    except Exception as e:
-        logger.error(f"WebSocket error for session {id}: {e}")
-        await websocket.close()
-    finally:
-        if id in SESSION_TO_CALL_SID:
-            del SESSION_TO_CALL_SID[id]
-            logger.debug(f"Removed WebSocket session {id} from SESSION_TO_CALL_SID")
+
 
 # Add routes to FastAPI app
 app.include_router(telephony_server.get_router())

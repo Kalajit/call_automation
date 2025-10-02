@@ -21073,7 +21073,7 @@ def get_default_agent_config(prompt_key: str = None, lead_name: str = "there") -
 
 
 class CustomTelephonyServer(TelephonyServer):
-    async def handle_websocket(self, ws: WebSocketConnection, conversation_id: str):
+    async def handle_websocket(self, ws, conversation_id: str):
         logger.debug(f"Handling WebSocket for conversation_id: {conversation_id}")
         # Ensure transcriber has the correct conversation_id
         transcriber = self.get_transcriber(conversation_id)

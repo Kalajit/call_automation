@@ -21037,37 +21037,6 @@ def get_default_agent_config(prompt_key: str = None, lead_name: str = "there") -
 
 
 # Telephony Server setup
-# telephony_server = TelephonyServer(
-#     base_url=BASE_URL,
-#     config_manager=config_manager,
-#     inbound_call_configs=[
-#         TwilioInboundCallConfig(
-#             url="/inbound_call",
-#             twilio_config=twilio_config,
-#             agent_config=get_default_agent_config(),
-#             synthesizer_config=synthesizer_config,
-#             transcriber_config=transcriber_config,
-#             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
-# <Response>
-#     <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
-#     <Pause length="15"/>
-#     <Redirect method="POST">/inbound_call</Redirect>
-# </Response>''',
-#             record=True,
-#             status_callback=f"https://{BASE_URL}/call_status",
-#             status_callback_method="POST",
-#             status_callback_event=["completed"]
-#         )
-#     ],
-#     agent_factory=CustomAgentFactory(),
-#     synthesizer_factory=CustomSynthesizerFactory(),
-#     events_manager=events_manager.EventsManager(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
-# )
-
-
-
-
-# From call_chess_coach.py (inbound call configuration in TelephonyServer)
 telephony_server = TelephonyServer(
     base_url=BASE_URL,
     config_manager=config_manager,
@@ -21087,13 +21056,44 @@ telephony_server = TelephonyServer(
             record=True,
             status_callback=f"https://{BASE_URL}/call_status",
             status_callback_method="POST",
-            status_callback_event=["initiated", "ringing", "answered", "completed"]  # Restore full event list
+            status_callback_event=["completed"]
         )
     ],
     agent_factory=CustomAgentFactory(),
     synthesizer_factory=CustomSynthesizerFactory(),
     events_manager=events_manager.EventsManager(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
 )
+
+
+
+
+## From call_chess_coach.py (inbound call configuration in TelephonyServer)
+# telephony_server = TelephonyServer(
+#     base_url=BASE_URL,
+#     config_manager=config_manager,
+#     inbound_call_configs=[
+#         TwilioInboundCallConfig(
+#             url="/inbound_call",
+#             twilio_config=twilio_config,
+#             agent_config=get_default_agent_config(),
+#             synthesizer_config=synthesizer_config,
+#             transcriber_config=transcriber_config,
+#             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
+# <Response>
+#     <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
+#     <Pause length="15"/>
+#     <Redirect method="POST">/inbound_call</Redirect>
+# </Response>''',
+#             record=True,
+#             status_callback=f"https://{BASE_URL}/call_status",
+#             status_callback_method="POST",
+#             status_callback_event=["initiated", "ringing", "answered", "completed"]  # Restore full event list
+#         )
+#     ],
+#     agent_factory=CustomAgentFactory(),
+#     synthesizer_factory=CustomSynthesizerFactory(),
+#     events_manager=events_manager.EventsManager(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
+# )
 
 
 

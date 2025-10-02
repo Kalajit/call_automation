@@ -21087,7 +21087,7 @@ telephony_server = TelephonyServer(
             record=True,
             status_callback=f"https://{BASE_URL}/call_status",
             status_callback_method="POST",
-            status_callback_event=["completed"]
+            status_callback_event=["initiated", "ringing", "answered", "completed"]  # Restore full event list
         )
     ],
     agent_factory=CustomAgentFactory(),

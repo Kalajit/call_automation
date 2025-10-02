@@ -20371,6 +20371,9 @@ class ChessEventsManager(events_manager.EventsManager):
             )
             twilio_audio_url = recordings[0].uri if recordings else None  # NEW: Get Twilio recording URL
 
+
+            
+
             await asyncio.get_event_loop().run_in_executor(
                 None, 
                 lambda: update_crm(transcript_complete_event.conversation_id, transcript, sentiment, summary, audio_url, twilio_audio_url=twilio_audio_url)  # Fixed to use audio_url
@@ -20446,12 +20449,13 @@ class CustomLangchainAgent(LangchainAgent):
         if self.conversation_id_cache not in CONVERSATION_STORE:
             lead = LEAD_CONTEXT_STORE.get(self.conversation_id_cache, {})
             CONVERSATION_STORE[self.conversation_id_cache] = {
-                "conversation_id": self.conversation_id_cache,
-                "updated_at": int(time.time() * 1000),
-                "lead": lead,
-                "slots": {},
-                "turns": [{"speaker": "bot", "text": agent_config.initial_message.text, "ts": int(time.time() * 1000)}]
-            }
+            "conversation_id": self.conversation_id_cache,
+            "updated_at": int(time.time() * 1000),
+            "lead": lead,
+            "slots": {},
+            "turns": [{"speaker": "bot", "text": agent_config.initial_message.text, "ts": int(time.time() * 1000)}],
+            "twilio_audio_url": None
+        }
             self._flush_to_disk(self.conversation_id_cache)
 
 
@@ -20483,9 +20487,10 @@ class CustomLangchainAgent(LangchainAgent):
         payload = {
             "conversation_id": conv_id,
             "updated_at": now_ms,
-            "lead": lead,  # ADDED n8n
-            "slots": self.extracted_slots,  # slots are LLM-extracted
-            "turns": self.turns
+            "lead": lead,
+            "slots": self.extracted_slots,
+            "turns": self.turns,
+            "twilio_audio_url": CONVERSATION_STORE.get(conv_id, {}).get("twilio_audio_url", None)
         }
         CONVERSATION_STORE[conv_id] = payload
         self._flush_to_disk(conv_id)  # ADDED: always flush on persist
@@ -20613,6 +20618,7 @@ class CustomLangchainAgent(LangchainAgent):
             current_id = self.conversation_id_cache or conversation_id or "unknown"
 
             if human_input:
+                logger.info(f"User input for CallSid={current_id}: {human_input}")
                 self.turns.append({"speaker": "user", "text": human_input, "ts": int(time.time()*1000)})
                 if len(self.turns) % 2 == 0:
                     asyncio.create_task(self._extract_slots_with_llm(current_id))
@@ -20804,10 +20810,13 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
             async with self.buffer_lock:
                 if self.conversation_id:
                     total_size = self.audio_buffer.tell() + len(audio_chunk)
-                    if total_size > 10 * 1024 * 1024:  # 10MB limit
+                    if total_size > 10 * 1024 * 1024:
                         await self._save_audio()
                     self.audio_buffer.write(audio_chunk)
-            return await super().process(audio_chunk)
+            result = await super().process(audio_chunk)
+            if result and isinstance(result, dict) and result.get("type") == "Results" and "transcript" in result:
+                logger.info(f"Transcription for CallSid={self.conversation_id}: {result['transcript']} (speaker={result.get('channel_index', [0,1])[0]})")
+            return result
         except Exception as e:
             logger.error(f"Deepgram process error: {e}")
             raise
@@ -20837,7 +20846,8 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
             audio_path = RECORDINGS_DIR / f"{self.conversation_id}.wav"
             with open(audio_path, 'wb') as f:
                 f.write(self.audio_buffer.getbuffer())
-            logger.info(f"Saved audio to {audio_path}")
+            file_size = audio_path.stat().st_size if audio_path.exists() else 0
+            logger.info(f"Saved audio to {audio_path}, size: {file_size} bytes")
             self.audio_buffer = io.BytesIO()
 
 # Custom Agent Factory
@@ -20995,11 +21005,14 @@ telephony_server = TelephonyServer(
             status_callback=f"https://{BASE_URL}/call_status",
             status_callback_method="POST",
             status_callback_event=["initiated", "ringing", "answered", "completed"],
+            recording_status_callback=f"https://{BASE_URL}/recording_status",
+            recording_status_callback_method="POST"
         )
     ],
     agent_factory=CustomAgentFactory(),
     synthesizer_factory=CustomSynthesizerFactory(),
-    events_manager=events_manager.EventsManager(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
+    # events_manager=events_manager.EventsManager(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
+    events_manager=ChessEventsManager()
 )
 
 
@@ -21133,7 +21146,9 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
             "status_callback_method": "POST",
             "status_callback_event": ["initiated", "ringing", "answered", "completed"],
             "record": True,
-            "recording_channels": "dual"
+            "recording_channels": "dual",
+            "recording_status_callback": f"{twilio_base_url}/recording_status",
+            "recording_status_callback_method": "POST"
         }
         logger.debug(f"Twilio call parameters: {call_params}")
         
@@ -21179,7 +21194,24 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
 
 
 
-
+@app.post("/recording_status")
+async def recording_status(request: Request):
+    try:
+        form_data = await request.form()
+        call_sid = form_data.get("CallSid")
+        recording_url = form_data.get("RecordingUrl")
+        recording_status = form_data.get("RecordingStatus")
+        logger.info(f"Recording status for CallSid={call_sid}: status={recording_status}, URL={recording_url}")
+        if recording_status == "completed" and recording_url and call_sid in CONVERSATION_STORE:
+            CONVERSATION_STORE[call_sid]["twilio_audio_url"] = recording_url
+            out_path = CONVERSATIONS_DIR / f"{call_sid}.json"
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(CONVERSATION_STORE[call_sid], f, ensure_ascii=False, indent=2)
+            logger.info(f"Updated conversation JSON with Twilio recording URL at {out_path}")
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"Error processing recording status: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing recording status: {str(e)}")
         
 
 
@@ -21246,7 +21278,7 @@ if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=3000)
 
     # Start outbound scheduler in a thread
-    scheduler_thread = threading.Thread(target=outbound_scheduler, daemon=True)
+    scheduler_thread = threading.Thread(target=lambda: asyncio.run(outbound_scheduler()), daemon=True)
     scheduler_thread.start()
 
     run_server()

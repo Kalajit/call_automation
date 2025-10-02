@@ -19679,7 +19679,7 @@ from fastapi.logger import logger as fastapi_logger
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from twilio.rest import Client
-from vocode.streaming.telephony.server.base import TelephonyServer, TwilioInboundCallConfig
+from vocode.streaming.telephony.server.base import TelephonyServer, TwilioInboundCallConfig, WebSocketConnection
 from vocode.streaming.models.telephony import TwilioConfig
 from vocode.streaming.models.agent import LangchainAgentConfig, AgentConfig
 from vocode.streaming.agent.langchain_agent import LangchainAgent
@@ -20910,7 +20910,7 @@ class CustomAgentFactory:
             
             if conversation_id:
                 # Check config_manager first
-                stored_config = config_manager.get_config(f"agent_{conversation_id}")
+                stored_config = await config_manager.get_config(f"agent_{conversation_id}")
                 if stored_config:
                     log.info(f"Using stored agent config for conversation_id: {conversation_id}, prompt: {stored_config.get('initial_message')}")
                     lead = stored_config.get("lead", {})
@@ -20918,7 +20918,9 @@ class CustomAgentFactory:
                     prompt_key = stored_config.get("prompt_config_key", prompt_key)
                     agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
                     log.debug(f"Updated agent config with prompt_key: {prompt_key}, initial_message: {agent_config.initial_message.text}")
-                    return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=conversation_id)
+                    agent = CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=conversation_id)
+                    log.debug(f"Agent created successfully for conversation_id: {conversation_id}")
+                    return agent
                 
                 # Fallback to LEAD_CONTEXT_STORE
                 lead = LEAD_CONTEXT_STORE.get(conversation_id, {})
@@ -20938,7 +20940,9 @@ class CustomAgentFactory:
                         "name": lead_name
                     })
                     log.debug(f"Saved new agent config for conversation_id: {conversation_id}")
-                    return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=conversation_id)
+                    agent = CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=conversation_id)
+                    log.debug(f"Agent created successfully for conversation_id: {conversation_id}")
+                    return agent
                 
                 log.warning(f"No stored config or lead for conversation_id: {conversation_id}, using prompt_key: {prompt_key}, lead_name: {lead_name}")
             else:
@@ -20956,11 +20960,12 @@ class CustomAgentFactory:
                     "name": lead_name
                 })
                 log.debug(f"Saved new agent config for temporary conversation_id: {temp_conversation_id}")
-                return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=temp_conversation_id)
+                agent = CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=temp_conversation_id)
+                log.debug(f"Agent created successfully for conversation_id: {temp_conversation_id}")
+                return agent
         
         log.error(f"Invalid agent config type: {agent_config.type}")
         raise Exception(f"Invalid agent config: {agent_config.type}")
-
 
 
 
@@ -21036,38 +21041,7 @@ def get_default_agent_config(prompt_key: str = None, lead_name: str = "there") -
 
 
 
-# Telephony Server setup
-telephony_server = TelephonyServer(
-    base_url=BASE_URL,
-    config_manager=config_manager,
-    inbound_call_configs=[
-        TwilioInboundCallConfig(
-            url="/inbound_call",
-            twilio_config=twilio_config,
-            agent_config=get_default_agent_config(),
-            synthesizer_config=synthesizer_config,
-            transcriber_config=transcriber_config,
-            twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
-    <Pause length="15"/>
-    <Redirect method="POST">/inbound_call</Redirect>
-</Response>''',
-            record=True,
-            status_callback=f"https://{BASE_URL}/call_status",
-            status_callback_method="POST",
-            status_callback_event=["completed"]
-        )
-    ],
-    agent_factory=CustomAgentFactory(),
-    synthesizer_factory=CustomSynthesizerFactory(),
-    events_manager=events_manager.EventsManager(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
-)
-
-
-
-
-## From call_chess_coach.py (inbound call configuration in TelephonyServer)
+# # Telephony Server setup
 # telephony_server = TelephonyServer(
 #     base_url=BASE_URL,
 #     config_manager=config_manager,
@@ -21087,7 +21061,7 @@ telephony_server = TelephonyServer(
 #             record=True,
 #             status_callback=f"https://{BASE_URL}/call_status",
 #             status_callback_method="POST",
-#             status_callback_event=["initiated", "ringing", "answered", "completed"]  # Restore full event list
+#             status_callback_event=["completed"]
 #         )
 #     ],
 #     agent_factory=CustomAgentFactory(),
@@ -21098,8 +21072,79 @@ telephony_server = TelephonyServer(
 
 
 
+class CustomTelephonyServer(TelephonyServer):
+    async def handle_websocket(self, ws: WebSocketConnection, conversation_id: str):
+        logger.debug(f"Handling WebSocket for conversation_id: {conversation_id}")
+        # Ensure transcriber has the correct conversation_id
+        transcriber = self.get_transcriber(conversation_id)
+        if isinstance(transcriber, CustomDeepgramTranscriber):
+            transcriber.set_conversation_id(conversation_id)
+        await super().handle_websocket(ws, conversation_id)
+# Update TelephonyServer instantiation
+telephony_server = CustomTelephonyServer(
+    base_url=BASE_URL,
+    config_manager=config_manager,
+    inbound_call_configs=[
+        TwilioInboundCallConfig(
+            url="/inbound_call",
+            twilio_config=twilio_config,
+            agent_config=get_default_agent_config(),
+            synthesizer_config=synthesizer_config,
+            transcriber_config=transcriber_config,
+            twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
+    <Pause length="15"/>
+    <Redirect method="POST">/inbound_call</Redirect>
+</Response>''',
+            record=True,
+            status_callback=f"https://{BASE_URL}/call_status",
+            status_callback_method="POST",
+            status_callback_event=["initiated", "ringing", "answered", "completed"]
+        )
+    ],
+    agent_factory=CustomAgentFactory(),
+    synthesizer_factory=CustomSynthesizerFactory(),
+    events_manager=events_manager.EventsManager(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
+)
 
 
+
+
+
+
+# # Add this endpoint after the TelephonyServer setup and before app.include_router(telephony_server.get_router())
+# @app.post("/inbound_call")
+# async def inbound_call(request: Request):
+#     try:
+#         form_data = await request.form()
+#         call_sid = form_data.get("CallSid")
+#         logger.debug(f"Received inbound call with CallSid: {call_sid}")
+
+#         if not call_sid:
+#             logger.error("No CallSid provided in inbound call")
+#             raise HTTPException(status_code=400, detail="CallSid is required")
+
+#         # Store the call_sid in LEAD_CONTEXT_STORE if not already present
+#         if call_sid not in LEAD_CONTEXT_STORE:
+#             LEAD_CONTEXT_STORE[call_sid] = {
+#                 "to_phone": form_data.get("To", ""),
+#                 "call_type": "qualification",
+#                 "prompt_config_key": DEFAULT_PROMPT_KEY or "chess_coach",
+#                 "name": form_data.get("name", "there")  # Fallback if no name in context
+#             }
+
+#         # Generate TwiML response with WebSocket URL using CallSid
+#         from twilio.twiml.voice_response import VoiceResponse, Connect
+#         twiml = VoiceResponse()
+#         connect = Connect()
+#         connect.stream(url=f"wss://{BASE_URL}/connect_call/{call_sid}")
+#         twiml.append(connect)
+#         logger.debug(f"TWIML response: {twiml}")
+#         return Response(content=str(twiml), media_type="application/xml")
+#     except Exception as e:
+#         logger.error(f"/inbound_call failed: {str(e)}")
+#         raise HTTPException(status_code=500, detail=f"Failed to process inbound call: {str(e)}")
 
 
 
@@ -21160,6 +21205,37 @@ def normalize_e164(number: str) -> str:
     return n
 
 # ADDED n8n: HTTP endpoint to start outbound call from n8n
+# @app.post("/outbound_call")
+# async def outbound_call(req: OutboundCallRequest):
+#     try:
+#         logger.debug(f"Received outbound call request: {req.dict()}")
+#         global DEFAULT_PROMPT_KEY
+#         DEFAULT_PROMPT_KEY = req.prompt_config_key
+#         logger.info(f"Set DEFAULT_PROMPT_KEY to {DEFAULT_PROMPT_KEY} from n8n request")
+#         to_phone = normalize_e164(req.to_phone)
+#         if not to_phone or len(to_phone) < 10:
+#             raise HTTPException(status_code=400, detail="Invalid phone number format")
+#         sid = await make_outbound_call(
+#             to_phone=to_phone,
+#             name=req.name,  # NEW: Pass name explicitly
+#             call_type=req.call_type,
+#             lead=req.lead,
+#             prompt_config_key=req.prompt_config_key
+#         )
+#         logger.info(f"Outbound call initiated: SID={sid}, name={req.name}, lead={req.lead}, prompt_config_key={req.prompt_config_key}")
+#         if req.transcript_callback_url:
+#             os.environ["TRANSCRIPT_CALLBACK_URL"] = req.transcript_callback_url
+#             logger.debug(f"Set TRANSCRIPT_CALLBACK_URL to {req.transcript_callback_url}")
+#         return {"ok": True, "call_sid": sid}
+#     except HTTPException as e:
+#         logger.error(f"HTTP error in /outbound_call: {e}")
+#         raise
+#     except Exception as e:
+#         logger.error(f"/outbound_call failed: {str(e)}")
+#         raise HTTPException(status_code=500, detail=f"Failed to process outbound call: {str(e)}")
+
+
+
 @app.post("/outbound_call")
 async def outbound_call(req: OutboundCallRequest):
     try:
@@ -21172,12 +21248,21 @@ async def outbound_call(req: OutboundCallRequest):
             raise HTTPException(status_code=400, detail="Invalid phone number format")
         sid = await make_outbound_call(
             to_phone=to_phone,
-            name=req.name,  # NEW: Pass name explicitly
+            name=req.name,
             call_type=req.call_type,
             lead=req.lead,
             prompt_config_key=req.prompt_config_key
         )
-        logger.info(f"Outbound call initiated: SID={sid}, name={req.name}, lead={req.lead}, prompt_config_key={req.prompt_config_key}")
+        # Update LEAD_CONTEXT_STORE with lead data
+        lead = req.lead or {}
+        lead.update({
+            "to_phone": to_phone,
+            "call_type": req.call_type,
+            "prompt_config_key": req.prompt_config_key,
+            "name": req.name
+        })
+        LEAD_CONTEXT_STORE[sid] = lead
+        logger.info(f"Outbound call initiated: SID={sid}, name={req.name}, lead={lead}, prompt_config_key={req.prompt_config_key}")
         if req.transcript_callback_url:
             os.environ["TRANSCRIPT_CALLBACK_URL"] = req.transcript_callback_url
             logger.debug(f"Set TRANSCRIPT_CALLBACK_URL to {req.transcript_callback_url}")
@@ -21277,40 +21362,6 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
 
 
 
-
-
-# Add this endpoint after the TelephonyServer setup and before app.include_router(telephony_server.get_router())
-@app.post("/inbound_call")
-async def inbound_call(request: Request):
-    try:
-        form_data = await request.form()
-        call_sid = form_data.get("CallSid")
-        logger.debug(f"Received inbound call with CallSid: {call_sid}")
-
-        if not call_sid:
-            logger.error("No CallSid provided in inbound call")
-            raise HTTPException(status_code=400, detail="CallSid is required")
-
-        # Store the call_sid in LEAD_CONTEXT_STORE if not already present
-        if call_sid not in LEAD_CONTEXT_STORE:
-            LEAD_CONTEXT_STORE[call_sid] = {
-                "to_phone": form_data.get("To", ""),
-                "call_type": "qualification",
-                "prompt_config_key": DEFAULT_PROMPT_KEY or "chess_coach",
-                "name": form_data.get("name", "there")  # Fallback if no name in context
-            }
-
-        # Generate TwiML response with WebSocket URL using CallSid
-        from twilio.twiml.voice_response import VoiceResponse, Connect
-        twiml = VoiceResponse()
-        connect = Connect()
-        connect.stream(url=f"wss://{BASE_URL}/connect_call/{call_sid}")
-        twiml.append(connect)
-        logger.debug(f"TWIML response: {twiml}")
-        return Response(content=str(twiml), media_type="application/xml")
-    except Exception as e:
-        logger.error(f"/inbound_call failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to process inbound call: {str(e)}")
 
 
 

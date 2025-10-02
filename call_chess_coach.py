@@ -20838,8 +20838,69 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
             self.audio_buffer = io.BytesIO()
 
 # Custom Agent Factory
+# class CustomAgentFactory:
+#     def create_agent(self, agent_config: AgentConfig, logger: typing.Optional[logging.Logger] = None, conversation_id: typing.Optional[str] = None) -> BaseAgent:
+#         log = logger or globals().get('logger', logging.getLogger(__name__))
+#         log.debug(f"Creating agent with config type: {agent_config.type}, conversation_id: {conversation_id}")
+        
+#         if agent_config.type == "agent_langchain":
+#             prompt_key = DEFAULT_PROMPT_KEY if DEFAULT_PROMPT_KEY and DEFAULT_PROMPT_KEY in PROMPT_CONFIGS else "chess_coach"
+#             lead_name = "there"
+            
+#             if conversation_id:
+#                 stored_config = config_manager.get_config(f"agent_{conversation_id}")
+#                 if stored_config:
+#                     log.info(f"Using stored agent config for conversation_id: {conversation_id}, prompt: {stored_config.get('initial_message')}")
+#                     lead = stored_config.get("lead", {})
+#                     lead_name = stored_config.get("name", lead.get("name", "there"))  # NEW: Prioritize stored name
+#                     prompt_key = stored_config.get("prompt_config_key", prompt_key)
+#                     agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
+#                     log.debug(f"Updated agent config with prompt_key: {prompt_key}, initial_message: {agent_config.initial_message.text}")
+#                     return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
+#                 else:
+#                     lead = LEAD_CONTEXT_STORE.get(conversation_id, {})
+#                     lead_name = lead.get("name", "there")
+#                     log.warning(f"No stored config for conversation_id: {conversation_id}, using prompt_key: {prompt_key}, lead_name: {lead_name}")
+#                     agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
+#                     config_manager.save_config(f"agent_{conversation_id}", {
+#                         "initial_message": agent_config.initial_message.text,
+#                         "prompt_preamble": agent_config.prompt_preamble,
+#                         "model_name": agent_config.model_name,
+#                         "api_key": agent_config.api_key,
+#                         "provider": agent_config.provider,
+#                         "lead": lead,
+#                         "prompt_config_key": prompt_key,
+#                         "name": lead_name  # NEW: Store name in config
+#                     })
+#                     log.debug(f"Saved new agent config for conversation_id: {conversation_id}")
+#                     return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
+#             else:
+#                 temp_conversation_id = f"temp_{int(time.time()*1000)}"
+#                 lead = LEAD_CONTEXT_STORE.get(temp_conversation_id, {})
+#                 lead_name = lead.get("name", "there")
+#                 log.warning(f"No conversation_id provided, using temporary ID: {temp_conversation_id}, lead_name: {lead_name}")
+#                 agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
+#                 config_manager.save_config(f"agent_{temp_conversation_id}", {
+#                     "initial_message": agent_config.initial_message.text,
+#                     "prompt_preamble": agent_config.prompt_preamble,
+#                     "model_name": agent_config.model_name,
+#                     "api_key": agent_config.api_key,
+#                     "provider": agent_config.provider,
+#                     "lead": lead,
+#                     "prompt_config_key": prompt_key,
+#                     "name": lead_name  # NEW: Store name in config
+#                 })
+#                 log.debug(f"Saved new agent config for temporary conversation_id: {temp_conversation_id}")
+#                 return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
+        
+#         log.error(f"Invalid agent config type: {agent_config.type}")
+#         raise Exception(f"Invalid agent config: {agent_config.type}")
+
+
+
+
 class CustomAgentFactory:
-    def create_agent(self, agent_config: AgentConfig, logger: typing.Optional[logging.Logger] = None, conversation_id: typing.Optional[str] = None) -> BaseAgent:
+    async def create_agent(self, agent_config: AgentConfig, logger: typing.Optional[logging.Logger] = None, conversation_id: typing.Optional[str] = None) -> BaseAgent:
         log = logger or globals().get('logger', logging.getLogger(__name__))
         log.debug(f"Creating agent with config type: {agent_config.type}, conversation_id: {conversation_id}")
         
@@ -20848,21 +20909,25 @@ class CustomAgentFactory:
             lead_name = "there"
             
             if conversation_id:
+                # Check config_manager first
                 stored_config = config_manager.get_config(f"agent_{conversation_id}")
                 if stored_config:
                     log.info(f"Using stored agent config for conversation_id: {conversation_id}, prompt: {stored_config.get('initial_message')}")
                     lead = stored_config.get("lead", {})
-                    lead_name = stored_config.get("name", lead.get("name", "there"))  # NEW: Prioritize stored name
+                    lead_name = stored_config.get("name", lead.get("name", "there"))
                     prompt_key = stored_config.get("prompt_config_key", prompt_key)
                     agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
                     log.debug(f"Updated agent config with prompt_key: {prompt_key}, initial_message: {agent_config.initial_message.text}")
-                    return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
-                else:
-                    lead = LEAD_CONTEXT_STORE.get(conversation_id, {})
+                    return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=conversation_id)
+                
+                # Fallback to LEAD_CONTEXT_STORE
+                lead = LEAD_CONTEXT_STORE.get(conversation_id, {})
+                if lead:
                     lead_name = lead.get("name", "there")
-                    log.warning(f"No stored config for conversation_id: {conversation_id}, using prompt_key: {prompt_key}, lead_name: {lead_name}")
+                    prompt_key = lead.get("prompt_config_key", prompt_key)
+                    log.debug(f"Using LEAD_CONTEXT_STORE for conversation_id: {conversation_id}, lead_name: {lead_name}, prompt_key: {prompt_key}")
                     agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
-                    config_manager.save_config(f"agent_{conversation_id}", {
+                    await config_manager.save_config(f"agent_{conversation_id}", {
                         "initial_message": agent_config.initial_message.text,
                         "prompt_preamble": agent_config.prompt_preamble,
                         "model_name": agent_config.model_name,
@@ -20870,28 +20935,28 @@ class CustomAgentFactory:
                         "provider": agent_config.provider,
                         "lead": lead,
                         "prompt_config_key": prompt_key,
-                        "name": lead_name  # NEW: Store name in config
+                        "name": lead_name
                     })
                     log.debug(f"Saved new agent config for conversation_id: {conversation_id}")
-                    return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
+                    return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=conversation_id)
+                
+                log.warning(f"No stored config or lead for conversation_id: {conversation_id}, using prompt_key: {prompt_key}, lead_name: {lead_name}")
             else:
                 temp_conversation_id = f"temp_{int(time.time()*1000)}"
-                lead = LEAD_CONTEXT_STORE.get(temp_conversation_id, {})
-                lead_name = lead.get("name", "there")
                 log.warning(f"No conversation_id provided, using temporary ID: {temp_conversation_id}, lead_name: {lead_name}")
                 agent_config = get_default_agent_config(prompt_key=prompt_key, lead_name=lead_name)
-                config_manager.save_config(f"agent_{temp_conversation_id}", {
+                await config_manager.save_config(f"agent_{temp_conversation_id}", {
                     "initial_message": agent_config.initial_message.text,
                     "prompt_preamble": agent_config.prompt_preamble,
                     "model_name": agent_config.model_name,
                     "api_key": agent_config.api_key,
                     "provider": agent_config.provider,
-                    "lead": lead,
+                    "lead": {},
                     "prompt_config_key": prompt_key,
-                    "name": lead_name  # NEW: Store name in config
+                    "name": lead_name
                 })
                 log.debug(f"Saved new agent config for temporary conversation_id: {temp_conversation_id}")
-                return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config))
+                return CustomLangchainAgent(agent_config=typing.cast(CustomLangchainAgentConfig, agent_config), conversation_id=temp_conversation_id)
         
         log.error(f"Invalid agent config type: {agent_config.type}")
         raise Exception(f"Invalid agent config: {agent_config.type}")
@@ -20972,6 +21037,37 @@ def get_default_agent_config(prompt_key: str = None, lead_name: str = "there") -
 
 
 # Telephony Server setup
+# telephony_server = TelephonyServer(
+#     base_url=BASE_URL,
+#     config_manager=config_manager,
+#     inbound_call_configs=[
+#         TwilioInboundCallConfig(
+#             url="/inbound_call",
+#             twilio_config=twilio_config,
+#             agent_config=get_default_agent_config(),
+#             synthesizer_config=synthesizer_config,
+#             transcriber_config=transcriber_config,
+#             twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
+# <Response>
+#     <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
+#     <Pause length="15"/>
+#     <Redirect method="POST">/inbound_call</Redirect>
+# </Response>''',
+#             record=True,
+#             status_callback=f"https://{BASE_URL}/call_status",
+#             status_callback_method="POST",
+#             status_callback_event=["completed"]
+#         )
+#     ],
+#     agent_factory=CustomAgentFactory(),
+#     synthesizer_factory=CustomSynthesizerFactory(),
+#     events_manager=events_manager.EventsManager(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
+# )
+
+
+
+
+# From call_chess_coach.py (inbound call configuration in TelephonyServer)
 telephony_server = TelephonyServer(
     base_url=BASE_URL,
     config_manager=config_manager,
@@ -20998,6 +21094,47 @@ telephony_server = TelephonyServer(
     synthesizer_factory=CustomSynthesizerFactory(),
     events_manager=events_manager.EventsManager(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
 )
+
+
+
+
+
+
+# Add this endpoint after the TelephonyServer setup and before app.include_router(telephony_server.get_router())
+@app.post("/inbound_call")
+async def inbound_call(request: Request):
+    try:
+        form_data = await request.form()
+        call_sid = form_data.get("CallSid")
+        logger.debug(f"Received inbound call with CallSid: {call_sid}")
+
+        if not call_sid:
+            logger.error("No CallSid provided in inbound call")
+            raise HTTPException(status_code=400, detail="CallSid is required")
+
+        # Store the call_sid in LEAD_CONTEXT_STORE if not already present
+        if call_sid not in LEAD_CONTEXT_STORE:
+            LEAD_CONTEXT_STORE[call_sid] = {
+                "to_phone": form_data.get("To", ""),
+                "call_type": "qualification",
+                "prompt_config_key": DEFAULT_PROMPT_KEY or "chess_coach",
+                "name": form_data.get("name", "there")  # Fallback if no name in context
+            }
+
+        # Generate TwiML response with WebSocket URL using CallSid
+        from twilio.twiml.voice_response import VoiceResponse, Connect
+        twiml = VoiceResponse()
+        connect = Connect()
+        connect.stream(url=f"wss://{BASE_URL}/connect_call/{call_sid}")
+        twiml.append(connect)
+        logger.debug(f"TWIML response: {twiml}")
+        return Response(content=str(twiml), media_type="application/xml")
+    except Exception as e:
+        logger.error(f"/inbound_call failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process inbound call: {str(e)}")
+
+
+
 
 # Add routes to FastAPI app
 app.include_router(telephony_server.get_router())
@@ -21172,30 +21309,59 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
 
 
 
+
+
+
+
 # NEW: Outbound Call Scheduler (for auto-dialing from CRM)
-def outbound_scheduler():
+async def outbound_scheduler():
+    loop = asyncio.get_event_loop()
     while True:
-        response = requests.get(CRM_API_URL, headers={"Authorization": f"Bearer {CRM_API_KEY}"})
-        if response.status_code == 200:
+        try:
+            response = requests.get(CRM_API_URL, headers={"Authorization": f"Bearer {CRM_API_KEY}"})
+            if response.status_code != 200:
+                logger.error(f"Failed to fetch leads from CRM: {response.status_code} - {response.text}")
+                await asyncio.sleep(300)
+                continue
+
             leads = response.json().get("leads", [])
             for lead in leads:
                 if lead.get("status") == "Call Pending":
                     call_type = lead.get("call_type", "qualification")
                     prompt_key = lead.get("prompt_config_key")
-                    name = lead.get("name", "there")  # NEW: Extract name from lead
+                    name = lead.get("name")
+                    
+                    if not name:
+                        logger.error(f"Missing name for lead ID: {lead.get('id')}, skipping call")
+                        update_crm(lead["id"], "", {}, {}, "", status="Failed", appointment={"error": "Missing name"})
+                        continue
+                    
                     if not prompt_key or prompt_key not in PROMPT_CONFIGS:
                         logger.error(f"Invalid prompt_config_key in lead: {prompt_key}, falling back to 'chess_coach'")
                         prompt_key = "chess_coach"
+                    
                     logger.info(f"Scheduling outbound call for lead: {lead.get('id')}, name: {name}, prompt_key: {prompt_key}")
-                    asyncio.run(make_outbound_call(
-                        to_phone=lead["phone"],
-                        name=name,  # NEW: Pass name explicitly
-                        call_type=call_type,
-                        lead=lead,
-                        prompt_key=prompt_key
-                    ))
-                    update_crm(lead["id"], "", {}, {}, "", status="Calling")
-        time.sleep(300)
+                    try:
+                        # Run async call in the existing event loop
+                        call_sid = await make_outbound_call(
+                            to_phone=lead["phone"],
+                            name=name,
+                            call_type=call_type,
+                            lead=lead,
+                            prompt_key=prompt_key
+                        )
+                        update_crm(lead["id"], "", {}, {}, "", status="Calling", appointment={"call_sid": call_sid})
+                    except HTTPException as e:
+                        logger.error(f"Failed to initiate call for lead ID: {lead.get('id')}: {str(e)}")
+                        update_crm(lead["id"], "", {}, {}, "", status="Failed", appointment={"error": str(e)})
+                    except Exception as e:
+                        logger.error(f"Unexpected error for lead ID: {lead.get('id')}: {str(e)}")
+                        update_crm(lead["id"], "", {}, {}, "", status="Failed", appointment={"error": str(e)})
+            
+            await asyncio.sleep(300)  # Wait 5 minutes before next check
+        except Exception as e:
+            logger.error(f"Outbound scheduler error: {str(e)}")
+            await asyncio.sleep(300)  # Wait before retrying on error
 
 
 # Main entrypoint (updated to include scheduler)

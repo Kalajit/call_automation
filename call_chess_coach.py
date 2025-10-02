@@ -21180,7 +21180,7 @@ async def outbound_call(req: OutboundCallRequest):
 
 
 
-async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dict = None, prompt_key: str = None):
+async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dict = None, prompt_config_key: str = None):
     try:
         if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, BASE_URL]):
             logger.error("Missing required Twilio environment variables")
@@ -21189,12 +21189,12 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         twilio_base_url = f"https://{BASE_URL}"
         
-        if not prompt_key or prompt_key not in PROMPT_CONFIGS:
-            logger.warning(f"Invalid prompt_key: {prompt_key}. Falling back to 'chess_coach'")
-            prompt_key = "chess_coach"
-        prompt_config = PROMPT_CONFIGS[prompt_key]
+        if not prompt_config_key or prompt_config_key not in PROMPT_CONFIGS:
+            logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Falling back to 'chess_coach'")
+            prompt_config_key = "chess_coach"
+        prompt_config = PROMPT_CONFIGS[prompt_config_key]
         initial_message = prompt_config["initial_message"].replace("{{name}}", name or "there")
-        logger.debug(f"make_outbound_call: to_phone={to_phone}, name={name}, call_type={call_type}, prompt_key={prompt_key}, initial_message={initial_message}")
+        logger.debug(f"make_outbound_call: to_phone={to_phone}, name={name}, call_type={call_type}, prompt_config_key={prompt_config_key}, initial_message={initial_message}")
         
         call = client.calls.create(
             to=to_phone,
@@ -21212,7 +21212,7 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
             "to_phone": to_phone,
             "name": name,
             "call_type": call_type,
-            "prompt_config_key": prompt_key
+            "prompt_config_key": prompt_config_key
         })
         LEAD_CONTEXT_STORE[call_sid] = lead
         logger.info(f"Populated LEAD_CONTEXT_STORE for call_sid: {call_sid}, data: {LEAD_CONTEXT_STORE[call_sid]}")
@@ -21224,10 +21224,10 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
             "api_key": GROQ_API_KEY,
             "provider": "groq",
             "lead": lead,
-            "prompt_config_key": prompt_key,
+            "prompt_config_key": prompt_config_key,
             "name": name
         })
-        logger.info(f"Saved agent config for call_sid: {call_sid}, prompt_key: {prompt_key}, name: {name}")
+        logger.info(f"Saved agent config for call_sid: {call_sid}, prompt_config_key: {prompt_config_key}, name: {name}")
         
         CONVERSATION_STORE[call_sid] = {
             "conversation_id": call_sid,

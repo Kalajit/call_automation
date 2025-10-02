@@ -19679,7 +19679,7 @@ from fastapi.logger import logger as fastapi_logger
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from twilio.rest import Client
-from vocode.streaming.telephony.server.base import TelephonyServer, TwilioInboundCallConfig, WebSocketConnection
+from vocode.streaming.telephony.server.base import TelephonyServer, TwilioInboundCallConfig
 from vocode.streaming.models.telephony import TwilioConfig
 from vocode.streaming.models.agent import LangchainAgentConfig, AgentConfig
 from vocode.streaming.agent.langchain_agent import LangchainAgent

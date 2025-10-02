@@ -21100,38 +21100,6 @@ telephony_server = TelephonyServer(
 
 
 
-# Add this endpoint after the TelephonyServer setup and before app.include_router(telephony_server.get_router())
-@app.post("/inbound_call")
-async def inbound_call(request: Request):
-    try:
-        form_data = await request.form()
-        call_sid = form_data.get("CallSid")
-        logger.debug(f"Received inbound call with CallSid: {call_sid}")
-
-        if not call_sid:
-            logger.error("No CallSid provided in inbound call")
-            raise HTTPException(status_code=400, detail="CallSid is required")
-
-        # Store the call_sid in LEAD_CONTEXT_STORE if not already present
-        if call_sid not in LEAD_CONTEXT_STORE:
-            LEAD_CONTEXT_STORE[call_sid] = {
-                "to_phone": form_data.get("To", ""),
-                "call_type": "qualification",
-                "prompt_config_key": DEFAULT_PROMPT_KEY or "chess_coach",
-                "name": form_data.get("name", "there")  # Fallback if no name in context
-            }
-
-        # Generate TwiML response with WebSocket URL using CallSid
-        from twilio.twiml.voice_response import VoiceResponse, Connect
-        twiml = VoiceResponse()
-        connect = Connect()
-        connect.stream(url=f"wss://{BASE_URL}/connect_call/{call_sid}")
-        twiml.append(connect)
-        logger.debug(f"TWIML response: {twiml}")
-        return Response(content=str(twiml), media_type="application/xml")
-    except Exception as e:
-        logger.error(f"/inbound_call failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to process inbound call: {str(e)}")
 
 
 
@@ -21309,6 +21277,40 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
 
 
 
+
+
+# Add this endpoint after the TelephonyServer setup and before app.include_router(telephony_server.get_router())
+@app.post("/inbound_call")
+async def inbound_call(request: Request):
+    try:
+        form_data = await request.form()
+        call_sid = form_data.get("CallSid")
+        logger.debug(f"Received inbound call with CallSid: {call_sid}")
+
+        if not call_sid:
+            logger.error("No CallSid provided in inbound call")
+            raise HTTPException(status_code=400, detail="CallSid is required")
+
+        # Store the call_sid in LEAD_CONTEXT_STORE if not already present
+        if call_sid not in LEAD_CONTEXT_STORE:
+            LEAD_CONTEXT_STORE[call_sid] = {
+                "to_phone": form_data.get("To", ""),
+                "call_type": "qualification",
+                "prompt_config_key": DEFAULT_PROMPT_KEY or "chess_coach",
+                "name": form_data.get("name", "there")  # Fallback if no name in context
+            }
+
+        # Generate TwiML response with WebSocket URL using CallSid
+        from twilio.twiml.voice_response import VoiceResponse, Connect
+        twiml = VoiceResponse()
+        connect = Connect()
+        connect.stream(url=f"wss://{BASE_URL}/connect_call/{call_sid}")
+        twiml.append(connect)
+        logger.debug(f"TWIML response: {twiml}")
+        return Response(content=str(twiml), media_type="application/xml")
+    except Exception as e:
+        logger.error(f"/inbound_call failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process inbound call: {str(e)}")
 
 
 

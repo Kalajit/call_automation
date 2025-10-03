@@ -20400,45 +20400,111 @@ class ChessEventsManager(events_manager.EventsManager):
     def __init__(self):
         super().__init__(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
 
+    # async def handle_event(self, event: Event):
+    #     if event.type == EventType.TRANSCRIPT_COMPLETE:
+    #         transcript_complete_event = typing.cast(TranscriptCompleteEvent, event)
+    #         transcript = transcript_complete_event.transcript.to_string()
+    #         logger.debug(f"Transcript for conversation {transcript_complete_event.conversation_id}: {transcript}")
+
+    #         # NEW: Sentiment analysis
+    #         sentiment = await sentiment_chain.ainvoke({"transcript": transcript})
+
+    #         # NEW: Summary generation
+    #         summary = await summary_chain.ainvoke({"transcript": transcript})
+
+    #         # NEW: Recording storage (using Deepgram audio chunks)
+    #         transcriber = telephony_server.get_transcriber(transcript_complete_event.conversation_id)
+    #         audio_path = await save_recording(transcript_complete_event.conversation_id, transcriber)
+    #         audio_url = f"{CLOUD_STORAGE_URL}/{os.path.basename(audio_path)}" if CLOUD_STORAGE_URL else audio_path
+
+    #         # NEW: Fetch Twilio recording URL if available
+    #         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    #         recordings = await asyncio.get_event_loop().run_in_executor(
+    #             None,
+    #             lambda: client.recordings.list(call_sid=transcript_complete_event.conversation_id)
+    #         )
+    #         twilio_audio_url = recordings[0].uri if recordings else None  # NEW: Get Twilio recording URL
+
+
+            
+
+    #         # await asyncio.get_event_loop().run_in_executor(
+    #         #     None, 
+    #         #     lambda: update_crm(transcript_complete_event.conversation_id, transcript, sentiment, summary, audio_url, twilio_audio_url=twilio_audio_url)  # Fixed to use audio_url
+    #         # )
+
+    #         await update_crm(transcript_complete_event.conversation_id, transcript, sentiment, summary, audio_url, twilio_audio_url=twilio_audio_url)
+
+    #         # NEW: Send summary to customer/management
+    #         # Assume email and phone from lead context or CRM
+    #         short_summary = f"Call Summary: {summary['summary'][:100]}... Next steps: {', '.join(summary['next_actions'][:2])}"
+    #         lead = LEAD_CONTEXT_STORE.get(transcript_complete_event.conversation_id, {})
+    #         if "email" in lead:
+    #             send_email(lead["email"], "Call Summary", short_summary)
+    #         if "to_phone" in lead:
+    #             send_whatsapp(lead["to_phone"], short_summary)
+
+    #         webhook_url = os.getenv("TRANSCRIPT_CALLBACK_URL")
+    #         if webhook_url:
+    #             data = {"conversation_id": transcript_complete_event.conversation_id, "user_id": 1, "transcript": transcript}
+    #             async with httpx.AsyncClient() as client:
+    #                 response = await client.post(webhook_url, json=data)
+    #                 if response.status_code == 200:
+    #                     logger.info("Transcript sent successfully to webhook")
+    #                 else:
+    #                     logger.error(f"Failed to send transcript to webhook: {response.status_code}")
+    #         # ADDED for JSON capture with LLM extraction: write store JSON to disk
+    #         async with CONVERSATION_STORE_LOCK:
+    #             convo = CONVERSATION_STORE.get(transcript_complete_event.conversation_id)
+    #             if convo:
+    #                 convo["sentiment"] = sentiment
+    #                 convo["summary"] = summary
+    #                 out_path = CONVERSATIONS_DIR / f"{transcript_complete_event.conversation_id}.json"
+    #                 async with aiofiles.open(out_path, "w", encoding="utf-8") as f:
+    #                     await f.write(json.dumps(convo, ensure_ascii=False, indent=2))
+    #                 logger.info(f"Wrote JSON summary to {out_path}")
+
+
+
     async def handle_event(self, event: Event):
         if event.type == EventType.TRANSCRIPT_COMPLETE:
             transcript_complete_event = typing.cast(TranscriptCompleteEvent, event)
+            conversation_id = transcript_complete_event.conversation_id
             transcript = transcript_complete_event.transcript.to_string()
-            logger.debug(f"Transcript for conversation {transcript_complete_event.conversation_id}: {transcript}")
+            logger.debug(f"Transcript for conversation {conversation_id}: {transcript}")
 
             # NEW: Sentiment analysis
             sentiment = await sentiment_chain.ainvoke({"transcript": transcript})
-
+            print("<<<<<<<<<<<<<<<<<<<<<<<<<<<<",sentiment,"?>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
             # NEW: Summary generation
             summary = await summary_chain.ainvoke({"transcript": transcript})
+            print("<<<<<<<<<<<<<<<<<<<<<<<<",summary,">>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 
             # NEW: Recording storage (using Deepgram audio chunks)
-            transcriber = telephony_server.get_transcriber(transcript_complete_event.conversation_id)
-            audio_path = await save_recording(transcript_complete_event.conversation_id, transcriber)
-            audio_url = f"{CLOUD_STORAGE_URL}/{os.path.basename(audio_path)}" if CLOUD_STORAGE_URL else audio_path
+            conversation = self.telephony_server.get_conversation(conversation_id)  # Assume this method exists
+            audio_path = None
+            if conversation and hasattr(conversation, 'transcriber'):
+                transcriber = conversation.transcriber
+                audio_path = await save_recording(conversation_id, transcriber)
+            else:
+                logger.error(f"No conversation or transcriber found for {conversation_id}")
+                METRICS["errors"]["transcriber_missing"] += 1
+            audio_url = f"{CLOUD_STORAGE_URL}/{os.path.basename(audio_path)}" if audio_path and CLOUD_STORAGE_URL else audio_path or ""
 
             # NEW: Fetch Twilio recording URL if available
             client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
             recordings = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: client.recordings.list(call_sid=transcript_complete_event.conversation_id)
+                lambda: client.recordings.list(call_sid=conversation_id)
             )
             twilio_audio_url = recordings[0].uri if recordings else None  # NEW: Get Twilio recording URL
 
-
-            
-
-            # await asyncio.get_event_loop().run_in_executor(
-            #     None, 
-            #     lambda: update_crm(transcript_complete_event.conversation_id, transcript, sentiment, summary, audio_url, twilio_audio_url=twilio_audio_url)  # Fixed to use audio_url
-            # )
-
-            await update_crm(transcript_complete_event.conversation_id, transcript, sentiment, summary, audio_url, twilio_audio_url=twilio_audio_url)
+            # Update CRM with transcript, sentiment, summary, and audio URLs
+            await update_crm(conversation_id, transcript, sentiment, summary, audio_url, twilio_audio_url=twilio_audio_url)
 
             # NEW: Send summary to customer/management
-            # Assume email and phone from lead context or CRM
             short_summary = f"Call Summary: {summary['summary'][:100]}... Next steps: {', '.join(summary['next_actions'][:2])}"
-            lead = LEAD_CONTEXT_STORE.get(transcript_complete_event.conversation_id, {})
+            lead = LEAD_CONTEXT_STORE.get(conversation_id, {})
             if "email" in lead:
                 send_email(lead["email"], "Call Summary", short_summary)
             if "to_phone" in lead:
@@ -20446,20 +20512,21 @@ class ChessEventsManager(events_manager.EventsManager):
 
             webhook_url = os.getenv("TRANSCRIPT_CALLBACK_URL")
             if webhook_url:
-                data = {"conversation_id": transcript_complete_event.conversation_id, "user_id": 1, "transcript": transcript}
+                data = {"conversation_id": conversation_id, "user_id": 1, "transcript": transcript}
                 async with httpx.AsyncClient() as client:
                     response = await client.post(webhook_url, json=data)
                     if response.status_code == 200:
                         logger.info("Transcript sent successfully to webhook")
                     else:
                         logger.error(f"Failed to send transcript to webhook: {response.status_code}")
+
             # ADDED for JSON capture with LLM extraction: write store JSON to disk
             async with CONVERSATION_STORE_LOCK:
-                convo = CONVERSATION_STORE.get(transcript_complete_event.conversation_id)
+                convo = CONVERSATION_STORE.get(conversation_id)
                 if convo:
                     convo["sentiment"] = sentiment
                     convo["summary"] = summary
-                    out_path = CONVERSATIONS_DIR / f"{transcript_complete_event.conversation_id}.json"
+                    out_path = CONVERSATIONS_DIR / f"{conversation_id}.json"
                     async with aiofiles.open(out_path, "w", encoding="utf-8") as f:
                         await f.write(json.dumps(convo, ensure_ascii=False, indent=2))
                     logger.info(f"Wrote JSON summary to {out_path}")
@@ -20476,10 +20543,32 @@ async def save_recording(conversation_id: str, transcriber: Optional[DeepgramTra
     return ""
 
 
+# async def convert_mp3_to_wav(mp3_url: str, conversation_id: str) -> str:
+#     """Download and convert Twilio MP3 recording to WAV."""
+#     try:
+#         async with httpx.AsyncClient() as client:
+#             response = await client.get(mp3_url)
+#             response.raise_for_status()
+#             mp3_data = response.content
+#         mp3_buffer = io.BytesIO(mp3_data)
+#         audio = AudioSegment.from_mp3(mp3_buffer)
+#         wav_path = RECORDINGS_DIR / f"{conversation_id}_twilio.wav"
+#         async with aiofiles.open(wav_path, 'wb') as f:
+#             await f.write(audio.export(format="wav").read())
+#         logger.info(f"Converted Twilio MP3 to WAV at {wav_path}")
+#         METRICS["calls_completed"]["twilio_audio_converted"] += 1
+#         return str(wav_path)
+#     except Exception as e:
+#         logger.error(f"Failed to convert Twilio MP3 to WAV for {conversation_id}: {e}")
+#         METRICS["errors"]["twilio_audio_conversion_failed"] += 1
+#         return ""
+
+
+
+
 async def convert_mp3_to_wav(mp3_url: str, conversation_id: str) -> str:
-    """Download and convert Twilio MP3 recording to WAV."""
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)) as client:
             response = await client.get(mp3_url)
             response.raise_for_status()
             mp3_data = response.content
@@ -20492,7 +20581,7 @@ async def convert_mp3_to_wav(mp3_url: str, conversation_id: str) -> str:
         METRICS["calls_completed"]["twilio_audio_converted"] += 1
         return str(wav_path)
     except Exception as e:
-        logger.error(f"Failed to convert Twilio MP3 to WAV for {conversation_id}: {e}")
+        logger.error(f"Failed to convert Twilio MP3 to WAV for {conversation_id}: {e}", exc_info=True)
         METRICS["errors"]["twilio_audio_conversion_failed"] += 1
         return ""
 
@@ -21312,8 +21401,8 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
         twilio_base_url = f"https://{BASE_URL}"
         
         if not prompt_config_key or prompt_config_key not in PROMPT_CONFIGS:
-            logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Falling back to 'chess_coach'")
-            prompt_config_key = "chess_coach"
+            logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Falling back to 'hospital_receptionist'")
+            prompt_config_key = "chess_coach"  # Updated to match logs
         prompt_config = PROMPT_CONFIGS[prompt_config_key]
         initial_message = prompt_config["initial_message"].replace("{{name}}", name or "there")
         logger.debug(f"Using prompt_config_key: {prompt_config_key}, name: {name}, initial_message: {initial_message}")
@@ -21360,13 +21449,14 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
                 lambda: sync_make_call(client, call_params)
             )
             call_sid = call.sid
-            ACTIVE_CALLS.add(call_sid)  # Add to active calls
+            ACTIVE_CALLS.add(call_sid)  # Track active call
             METRICS["calls_initiated"][call_type] += 1  # Track successful initiation
         except Exception as twilio_error:
-            logger.error(f"Twilio API call failed after retries: {str(twilio_error)}")
+            logger.error(f"Twilio API call failed after retries: {str(twilio_error)}", exc_info=True)
             METRICS["errors"]["twilio_call_failed"] += 1
             raise HTTPException(status_code=500, detail=f"Twilio API error: {str(twilio_error)}")
         
+        # Await the save_config coroutine
         await config_manager.save_config(f"agent_{call_sid}", {
             "initial_message": agent_config.initial_message.text,
             "prompt_preamble": agent_config.prompt_preamble,
@@ -21375,7 +21465,8 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
             "provider": agent_config.provider,
             "lead": lead or {},
             "prompt_config_key": prompt_config_key,
-            "name": name
+            "name": name,
+            "conversation_id": call_sid  # Ensure conversation_id is stored
         })
         logger.info(f"Saved agent config for CallSid: {call_sid}, prompt_config_key: {prompt_config_key}, name: {name}")
         
@@ -21384,13 +21475,14 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
                 async with CONVERSATION_STORE_LOCK:
                     payload = CONVERSATION_STORE.get(conversation_id)
                     if not payload:
+                        logger.warning(f"No payload found for conversation_id: {conversation_id}")
                         return
                     out_path = CONVERSATIONS_DIR / f"{conversation_id}.json"
                     async with aiofiles.open(out_path, "w", encoding="utf-8") as f:
                         await f.write(json.dumps(payload, ensure_ascii=False, indent=2))
                     logger.debug(f"Flushed conversation {conversation_id} to {out_path}")
             except Exception as e:
-                logger.error(f"Flush to disk failed for {conversation_id}: {e}")
+                logger.error(f"Flush to disk failed for {conversation_id}: {e}", exc_info=True)
                 METRICS["errors"]["conversation_flush_failed"] += 1
 
         async with CONVERSATION_STORE_LOCK:
@@ -21409,8 +21501,9 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
         
         return call_sid
     except Exception as e:
-        logger.error(f"make_outbound_call failed: {str(e)}")
-        ACTIVE_CALLS.discard(call_sid) if 'call_sid' in locals() else None  # Clean up if call_sid was defined
+        logger.error(f"make_outbound_call failed: {str(e)}", exc_info=True)
+        if 'call_sid' in locals():
+            ACTIVE_CALLS.discard(call_sid)  # Clean up on failure
         METRICS["errors"]["general"] += 1
         raise HTTPException(status_code=500, detail=f"Failed to initiate call: {str(e)}")
 

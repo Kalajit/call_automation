@@ -19738,6 +19738,9 @@ from pydub import AudioSegment
 import aiofiles
 
 
+import websockets
+
+
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -20481,7 +20484,7 @@ class ChessEventsManager(events_manager.EventsManager):
             print("<<<<<<<<<<<<<<<<<<<<<<<<",summary,">>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 
             # NEW: Recording storage (using Deepgram audio chunks)
-            conversation = self.telephony_server.get_conversation(conversation_id)  # Assume this method exists
+            conversation = CONVERSATION_STORE.get(conversation_id)  # Use global CONVERSATION_STORE
             audio_path = None
             if conversation and hasattr(conversation, 'transcriber'):
                 transcriber = conversation.transcriber
@@ -20966,22 +20969,62 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
         self.audio_buffer = io.BytesIO()
         self.conversation_id = None
 
+        self.websocket = None
+        self.is_connected = False
+
+    # async def process(self, audio_chunk: bytes):
+    #     logger.debug(f"Processing audio chunk size: {len(audio_chunk)} bytes")
+    #     if not audio_chunk or len(audio_chunk) == 0:
+    #         logger.warning("Empty audio chunk - skipping")
+    #         return None
+    #     try:
+    #         async with self.buffer_lock:
+    #             if self.conversation_id:
+    #                 total_size = self.audio_buffer.tell() + len(audio_chunk)
+    #                 if total_size > 10 * 1024 * 1024:
+    #                     await self._save_audio()
+    #                 self.audio_buffer.write(audio_chunk)
+    #         result = await super().process(audio_chunk)
+    #         if result and isinstance(result, dict) and result.get("type") == "Results" and "transcript" in result:
+    #             logger.info(f"Transcription for CallSid={self.conversation_id}: {result['transcript']} (speaker={result.get('channel_index', [0,1])[0]})")
+    #         return result
+    #     except Exception as e:
+    #         logger.error(f"Deepgram process error: {e}")
+    #         raise
+
+
     async def process(self, audio_chunk: bytes):
         logger.debug(f"Processing audio chunk size: {len(audio_chunk)} bytes")
         if not audio_chunk or len(audio_chunk) == 0:
             logger.warning("Empty audio chunk - skipping")
             return None
         try:
+            # NEW: Ensure WebSocket connection is active
+            if not self.is_connected:
+                await self._connect_websocket()
+
             async with self.buffer_lock:
                 if self.conversation_id:
                     total_size = self.audio_buffer.tell() + len(audio_chunk)
-                    if total_size > 10 * 1024 * 1024:
+                    if total_size > 10 * 1024 * 1024:  # 10MB limit
                         await self._save_audio()
                     self.audio_buffer.write(audio_chunk)
-            result = await super().process(audio_chunk)
-            if result and isinstance(result, dict) and result.get("type") == "Results" and "transcript" in result:
-                logger.info(f"Transcription for CallSid={self.conversation_id}: {result['transcript']} (speaker={result.get('channel_index', [0,1])[0]})")
-            return result
+            
+            # NEW: Retry sending audio chunk up to 3 times
+            for attempt in range(3):
+                try:
+                    result = await super().process(audio_chunk)
+                    if result and isinstance(result, dict) and result.get("type") == "Results" and "transcript" in result:
+                        logger.info(f"Transcription for CallSid={self.conversation_id}: {result['transcript']} (speaker={result.get('channel_index', [0,1])[0]})")
+                    return result
+                except websockets.exceptions.ConnectionClosedError as e:
+                    logger.warning(f"WebSocket closed during process (attempt {attempt+1}/3): {e}")
+                    if attempt < 2:
+                        await self._connect_websocket()
+                        await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    else:
+                        logger.error("Max retries reached for WebSocket connection")
+                        raise
         except Exception as e:
             logger.error(f"Deepgram process error: {e}")
             raise
@@ -20989,12 +21032,15 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
 
     async def keepalive(self):
         while True:
-            await asyncio.sleep(10)
+            await asyncio.sleep(5)
             try:
-                await super().process(b"\x00" * 160)
-                logger.debug("Deepgram keepalive sent")
+                if self.is_connected:
+                    await super().process(b"\x00" * 160)
+                    logger.debug("Deepgram keepalive sent")
             except Exception as e:
                 logger.error(f"Keepalive failed: {e}")
+                # NEW: Attempt to reconnect on keepalive failure
+                await self._connect_websocket()
                 break
 
 
@@ -21014,6 +21060,23 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
             file_size = audio_path.stat().st_size if audio_path.exists() else 0
             logger.info(f"Saved audio to {audio_path}, size: {file_size} bytes")
             self.audio_buffer = io.BytesIO()
+
+    
+    # NEW: Method to establish/re-establish WebSocket connection
+    async def _connect_websocket(self):
+        try:
+            if self.websocket:
+                await self.websocket.close()
+            self.websocket = await websockets.connect(
+                f"wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&interim_results=true&language=en&model=nova-2-phonecall&punctuate=true",
+                extra_headers={"Authorization": f"Token {self.transcriber_config.api_key}"}
+            )
+            self.is_connected = True
+            logger.info("Deepgram WebSocket connected")
+        except Exception as e:
+            self.is_connected = False
+            logger.error(f"Failed to connect to Deepgram WebSocket: {e}")
+            raise
 
 # Custom Agent Factory
 class CustomAgentFactory:

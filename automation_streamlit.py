@@ -1,22 +1,16 @@
 import streamlit as st
 import requests
-import os
 import json
 import time
 import uuid
-from datetime import datetime  # For scheduled_time checks
+from datetime import datetime
+import os 
 
 BACKEND_URL = "https://call-automation-kxow.onrender.com"
 
-# Folders from your code
-CONVERSATIONS_DIR = "conversations"
-RECORDINGS_DIR = "recordings"
-LEADS_FILE = "leads.json"  # Local "CRM"
-
-# Prompt keys from your backend PROMPT_CONFIGS
 PROMPT_KEYS = ["medical_sales", "hospital_receptionist", "chess_coach"]
 
-# Voices with accents
+# Full voices list (14 as per your spec)
 AVAILABLE_VOICES = [
     {"name": "Brian", "gender": "Male", "accent": "British"},
     {"name": "Amy", "gender": "Female", "accent": "British"},
@@ -36,35 +30,53 @@ AVAILABLE_VOICES = [
 
 VOICE_OPTIONS = [f"{v['name']} ({v['gender']} - {v['accent']})" for v in AVAILABLE_VOICES]
 
-# Load/save leads (shared function)
-def load_leads():
-    if os.path.exists(LEADS_FILE):
-        with open(LEADS_FILE, "r") as f:
-            return json.load(f)
-    return []
+# FIXED: Fetch/save via backend API
+def get_leads():
+    try:
+        response = requests.get(f"{BACKEND_URL}/leads")
+        return response.json().get("leads", []) if response.status_code == 200 else []
+    except:
+        st.warning("Failed to fetch leads from backend.")
+        return []
 
-def save_leads(leads):
-    with open(LEADS_FILE, "w") as f:
-        json.dump(leads, f, indent=2)
+def add_lead_to_backend(name, phone, prompt_key, call_type, scheduled_time, status, details):
+    payload = {
+        "name": name,
+        "phone": phone,
+        "prompt_config_key": prompt_key,
+        "call_type": call_type,
+        "scheduled_time": scheduled_time,
+        "status": status,
+        "details": details
+    }
+    try:
+        response = requests.post(f"{BACKEND_URL}/add_lead", json=payload)
+        if response.status_code == 200:
+            return response.json().get("lead_id")
+        else:
+            st.error(f"Backend error: {response.text}")
+            return None
+    except Exception as e:
+        st.error(f"Failed to add lead to backend: {e}")
+        return None
 
-# NEW: Check for pending/scheduled leads
-# FIXED: Check with space-to-T
+# FIXED: Check pending (robust parsing)
 def check_pending_leads(leads):
     now = datetime.now()
     pending = []
-    scheduled_due = []
+    due = []
     for lead in leads:
         if lead.get("status") == "Call Pending":
             pending.append(lead)
         elif lead.get("scheduled_time"):
             try:
-                fixed_time = lead["scheduled_time"].replace(" ", "T")  # FIXED
-                sched_time = datetime.fromisoformat(fixed_time)
+                fixed = lead["scheduled_time"].replace(" ", "T").replace("-", "T")  # FIXED: Handle space/-
+                sched_time = datetime.fromisoformat(fixed)
                 if sched_time <= now:
-                    scheduled_due.append(lead)
+                    due.append(lead)
             except ValueError:
-                pass
-    return pending, scheduled_due
+                st.warning(f"Invalid time for {lead['name']}: {lead['scheduled_time']}")
+    return pending, due
 
 def get_metrics():
     try:
@@ -76,12 +88,43 @@ def get_metrics():
 def list_conversations():
     try:
         response = requests.get(f"{BACKEND_URL}/conversations")
-        if response.status_code == 200:
-            return response.json().get("conversations", [])
-        st.warning("No /conversations endpoint.")
-        return []
+        return response.json().get("conversations", []) if response.status_code == 200 else []
     except:
         return []
+
+# NEW: Auto-trigger first pending/due lead (called after refresh)
+def auto_trigger_pending(leads):
+    pending, due = check_pending_leads(leads)
+    all_ready = pending + due
+    if not all_ready:
+        return  # No action
+    
+    # Take first ready lead
+    first_lead = all_ready[0]
+    name = first_lead.get("name", "Unknown")
+    phone = first_lead.get("phone", "")
+    prompt_key = first_lead.get("prompt_config_key", "chess_coach")
+    call_type = first_lead.get("call_type", "qualification")
+    lead_data = first_lead.copy()
+    
+    payload = {
+        "to_phone": phone,
+        "name": name,
+        "lead": lead_data,
+        "call_type": call_type,
+        "prompt_config_key": prompt_key
+    }
+    
+    try:
+        response = requests.post(f"{BACKEND_URL}/outbound_call", json=payload)
+        if response.status_code == 200:
+            data = response.json()
+            st.success(f"🚀 Auto-started call for {name}! SID: {data.get('call_sid', 'Unknown')}")
+            st.info(f"Details: {call_type} via {prompt_key}")
+        else:
+            st.error(f"Auto-trigger failed for {name}: {response.text}")
+    except Exception as e:
+        st.error(f"Auto-trigger error for {name}: {e}")
 
 def auto_refresh_if_enabled(interval=30):
     if "auto_refresh" not in st.session_state:
@@ -104,7 +147,7 @@ def auto_refresh_if_enabled(interval=30):
         st.rerun()
 
 st.sidebar.title("AI Calling Dashboard")
-page = st.sidebar.radio("Go to", ["Home", "Initiate Manual Call", "Leads Management", "Call Logs", "Settings"])  # FIXED: Matched names
+page = st.sidebar.radio("Go to", ["Home", "Initiate Manual Call", "Leads Management", "Call Logs", "Settings"])
 
 if page == "Home":
     st.title("Dashboard (Like CloserX)")
@@ -125,27 +168,33 @@ if page == "Home":
         with col4:
             total_errors = sum(metrics.get('errors', {}).values())
             st.metric("Errors", total_errors)
-        st.json(metrics)
+        with st.expander("Full Metrics"):
+            st.json(metrics)
     else:
         st.warning("No metrics available. Is backend running?")
     
-    leads = load_leads()
+    # NEW: Check pending/scheduled leads every refresh + AUTO-TRIGGER
+    leads = get_leads()
     pending, due = check_pending_leads(leads)
     total_pending = len(pending) + len(due)
     if total_pending > 0:
-        st.warning(f"🚨 {total_pending} pending/due calls! Check Leads Management.")
-        st.json({"Pending": [p['name'] for p in pending], "Due Scheduled": [d['name'] for d in due]})
+        st.warning(f"🚨 {total_pending} pending/due calls detected!")
+        with st.expander("Details"):
+            st.json({"Pending": [p['name'] for p in pending], "Due Scheduled": [d['name'] for d in due]})
+        # AUTO-TRIGGER: If auto-refresh enabled, start first one
+        if st.session_state.get("auto_refresh", False):
+            auto_trigger_pending(leads)
     else:
         st.success("All leads up to date. No pending calls.")
     
-    auto_refresh_if_enabled()
+    auto_refresh_if_enabled()  # Triggers check + auto-call on 30s
 
 elif page == "Initiate Manual Call":
     st.title("Start Manual Outbound Call")
     st.write("Start a call now (manual trigger). Automated calls run via scheduler on leads.")
     
     with st.form(key="call_form"):
-        to_phone = st.text_input("Phone Number (e.g., +919876543210)")
+        to_phone = st.text_input("Phone Number (e.g., +917356793165)")
         name = st.text_input("Lead Name (required)")
         prompt_config_key = st.selectbox("Prompt Type", PROMPT_KEYS)
         call_type = st.selectbox("Call Type", ["qualification", "reminder", "payment"])
@@ -181,72 +230,71 @@ elif page == "Leads Management":
     st.title("Manage Leads (Automated Calls)")
     st.write("Add/edit leads here. Scheduler auto-calls if status='Call Pending' or scheduled_time is due.")
     
-    leads = load_leads()
+    leads = get_leads()  # FIXED: Fetch from backend
     
+    # Display leads table (FIXED: Highlight due/pending)
     if leads:
         st.subheader("Current Leads")
         pending, due = check_pending_leads(leads)
         if pending or due:
             st.warning(f"🚨 {len(pending)} pending + {len(due)} due scheduled leads below.")
         
-        for i, lead in enumerate(leads):
+        for lead in leads:
             is_pending = lead.get("status") == "Call Pending"
             is_due = False
             if lead.get("scheduled_time"):
                 try:
-                    fixed_time = lead["scheduled_time"].replace(" ", "T")  # FIXED
-                    is_due = datetime.fromisoformat(fixed_time) <= datetime.now()
+                    fixed = lead["scheduled_time"].replace(" ", "T").replace("-", "T")
+                    is_due = datetime.fromisoformat(fixed) <= datetime.now()
                 except ValueError:
                     pass
-            color = "background-color: #ffeb3b" if is_pending or is_due else ""
+            color = "background-color: #ffeb3b; padding: 10px; border: 1px solid orange;" if is_pending or is_due else ""
             st.markdown(f"""
             <div style="{color}">
-                **Lead ID:** {lead['id']} | **Name:** {lead['name']} | **Status:** {lead['status']}
+                **Lead ID:** {lead['id']} | **Name:** {lead['name']} | **Status:** {lead['status']} | **Ready?** {'Yes' if is_pending or is_due else 'No'}
             </div>
             """, unsafe_allow_html=True)
             
             with st.expander(f"Details: {lead['name']} ({lead['phone']})"):
                 st.json(lead)
-                if st.button(f"Delete Lead {lead['id']}", key=f"del_{i}"):
-                    leads.pop(i)
-                    save_leads(leads)
-                    st.rerun()
+                # Delete: POST to backend if needed, but for now, warn (add /delete_lead endpoint later)
+                if st.button(f"Delete Lead {lead['id']}", key=f"del_{lead['id']}"):
+                    st.warning("Delete not implemented yet – add /delete_lead to backend.")
     else:
         st.info("No leads yet.")
     
+    # Add new lead form (POST to backend)
     with st.form("add_lead"):
         name = st.text_input("Name (required)")
-        phone = st.text_input("Phone (e.g., +919876543210)")
+        phone = st.text_input("Phone (e.g., +917356793165)")
         prompt_key = st.selectbox("Prompt Type", PROMPT_KEYS)
         call_type = st.selectbox("Call Type", ["qualification", "reminder", "payment"])
-        scheduled_time = st.text_input("Scheduled Time (ISO: YYYY-MM-DDTHH:MM:SS with T, e.g., 2025-10-07T19:55:00, optional)")
-        status = st.selectbox("Status", ["Pending", "Call Pending", "Called", "Failed"])  # FIXED: Default "Call Pending" for immediate
-        other_details = st.text_area("Other Details (JSON)")
+        scheduled_time = st.text_input("Scheduled Time (ISO: YYYY-MM-DDTHH:MM:SS with T, e.g., 2025-10-07T20:30:00, optional)")
+        status = st.selectbox("Status", ["Pending", "Call Pending", "Called", "Failed"])
+        other_details = st.text_area("Other Details (JSON)", value="{}")
         
-        if st.form_submit_button("Add Lead"):
+        submit = st.form_submit_button("Add Lead")
+        
+        if submit:
             if not name or not phone:
                 st.error("Name and Phone required!")
             else:
                 try:
-                    details = json.loads(other_details) if other_details else {}
+                    details = json.loads(other_details)
                 except json.JSONDecodeError:
                     details = {}
                     st.warning("Invalid JSON; using empty.")
                 
-                new_lead = {
-                    "id": str(uuid.uuid4())[:8],
-                    "name": name,
-                    "phone": phone,
-                    "prompt_config_key": prompt_key,
-                    "call_type": call_type,
-                    "scheduled_time": scheduled_time if scheduled_time else None,
-                    "status": status if not scheduled_time else "Call Pending",  # FIXED: Auto "Call Pending" if scheduled
-                    "details": details,
-                    "updated_at": datetime.now().isoformat()
-                }
-                leads.append(new_lead)
-                save_leads(leads)
-                st.success("Lead added! Scheduler will auto-call if due.")
+                lead_id = add_lead_to_backend(name, phone, prompt_key, call_type, scheduled_time, status, details)
+                if lead_id:
+                    st.success(f"Lead added! ID: {lead_id}. Scheduler will auto-call if pending/due.")
+                    st.rerun()  # Refresh list
+                else:
+                    st.error("Failed to add lead.")
+    
+    # AUTO-TRIGGER: If auto-refresh, check and call first pending
+    if st.session_state.get("auto_refresh", False):
+        auto_trigger_pending(leads)
     
     auto_refresh_if_enabled()
 
@@ -274,7 +322,7 @@ elif page == "Call Logs":
                 else:
                     st.warning("No audio available.")
     else:
-        st.info("No calls yet. Run a call or add backend endpoint.")
+        st.info("No calls yet. Run a call first!")
     
     auto_refresh_if_enabled()
 

@@ -23670,7 +23670,8 @@ import aiofiles
 import websockets
 
 from datetime import datetime
-
+import uuid
+from asyncio import create_task
 
 
 
@@ -24962,6 +24963,84 @@ class CustomSynthesizerFactory:
 # FastAPI App
 app = FastAPI()
 
+
+
+
+async def outbound_scheduler():
+    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    LEADS_FILE = "leads.json"
+    logger.info("Starting outbound scheduler (polling every 30s)")
+    while True:
+        try:
+            leads = load_leads_from_file(LEADS_FILE)  # Use helper
+            logger.info(f"Scheduler: Loaded {len(leads)} leads")
+            
+            for lead in leads[:]:  # Copy to avoid mod during iter
+                lead_id = lead.get("id")
+                should_call = lead.get("status") == "Call Pending"
+                if not should_call:
+                    sched_time = lead.get("scheduled_time")
+                    if sched_time:
+                        try:
+                            # FIXED: Robust parsing (space or - to T)
+                            fixed_time = sched_time.replace(" ", "T").replace("-", "T")
+                            parsed_time = datetime.fromisoformat(fixed_time)
+                            if parsed_time <= datetime.now():
+                                should_call = True
+                                logger.info(f"Lead {lead_id} due now: {sched_time}")
+                        except ValueError as e:
+                            logger.warning(f"Invalid time for {lead_id}: {sched_time} ({e}). Skipping.")
+                            continue
+
+                if not should_call:
+                    continue
+
+                call_type = lead.get("call_type", "qualification")
+                prompt_key = lead.get("prompt_config_key", "chess_coach")
+                name = lead.get("name")
+                phone = lead.get("phone")
+
+                if not name or not phone:
+                    logger.error(f"Missing name/phone for {lead_id}; setting Failed.")
+                    lead["status"] = "Failed"
+                    save_leads_to_file(leads, LEADS_FILE)
+                    continue
+
+                # Active calls check
+                active_sids = [sid for sid in ACTIVE_CALLS if await is_call_active(client, sid)]
+                skip = any(
+                    LEAD_CONTEXT_STORE.get(sid, {}).get("to_phone") == phone or 
+                    LEAD_CONTEXT_STORE.get(sid, {}).get("id") == lead_id 
+                    for sid in active_sids
+                )
+                if skip:
+                    logger.info(f"Skipping {lead_id}: Active call")
+                    continue
+
+                logger.info(f"🚀 Auto-calling {lead_id}: {name} ({phone}) - {prompt_key}")
+                async with CALL_RATE_LIMITER:
+                    try:
+                        call_sid = await make_outbound_call(
+                            to_phone=phone, name=name, call_type=call_type, lead=lead, prompt_config_key=prompt_key
+                        )
+                        ACTIVE_CALLS.add(call_sid)
+                        lead["status"] = "Called"
+                        lead["call_sid"] = call_sid
+                        METRICS["calls_initiated"][call_type] += 1
+                        logger.info(f"✅ Called {lead_id}: SID {call_sid}")
+                    except Exception as e:
+                        logger.error(f"❌ Auto-call failed for {lead_id}: {e}")
+                        lead["status"] = "Failed"
+                        METRICS["errors"]["general"] += 1
+
+                save_leads_to_file(leads, LEADS_FILE)  # Save after each lead update
+            
+            await asyncio.sleep(30)  # FIXED: 30s poll
+        except Exception as e:
+            logger.error(f"❌ Scheduler error: {e}")
+            await asyncio.sleep(30)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.debug("Starting up FastAPI application")
@@ -24969,8 +25048,21 @@ async def lifespan(app: FastAPI):
     for route in app.routes:
         methods = getattr(route, "methods", ["WebSocket"])
         logger.debug(f" - {route.path} ({methods})")
-    yield
-    # ADDED: final sweep to persist any in-memory conversations at shutdown
+    
+    # FIXED: Start scheduler as non-blocking task
+    scheduler_task = create_task(outbound_scheduler())
+    logger.info("Scheduler task started (polling leads every 30s)")
+    
+    yield  # App runs here
+    
+    # Shutdown: Cancel scheduler + flush conversations
+    scheduler_task.cancel()
+    try:
+        await scheduler_task  # Wait for clean cancel
+    except asyncio.CancelledError:
+        logger.debug("Scheduler cancelled cleanly")
+    
+    # ADDED: Final sweep to persist any in-memory conversations at shutdown
     try:
         for conv_id in list(CONVERSATION_STORE.keys()):
             out_path = CONVERSATIONS_DIR / f"{conv_id}.json"
@@ -24980,6 +25072,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error during shutdown flush: {e}")
     logger.debug("Shutting down FastAPI application")
+
+
+
 
 app.router.lifespan_context = lifespan
 
@@ -25425,80 +25520,63 @@ async def list_conversations_endpoint():
 
 
 
-async def outbound_scheduler():
-    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+
+
+
+
+# NEW: Endpoint to add/update lead (from Streamlit)
+class AddLeadRequest(BaseModel):
+    name: str
+    phone: str
+    prompt_config_key: str
+    call_type: str = "qualification"
+    scheduled_time: Optional[str] = None
+    status: str = "Pending"
+    details: dict = {}
+
+@app.post("/add_lead")
+async def add_lead(req: AddLeadRequest):
+    try:
+        LEADS_FILE = "leads.json"
+        leads = load_leads_from_file(LEADS_FILE)  # Helper below
+        
+        new_lead = {
+            "id": str(uuid.uuid4())[:8],
+            "name": req.name,
+            "phone": req.phone,
+            "prompt_config_key": req.prompt_config_key,
+            "call_type": req.call_type,
+            "scheduled_time": req.scheduled_time,
+            "status": "Call Pending" if req.status == "Pending" and req.scheduled_time else req.status,  # Auto immediate
+            "details": req.details,
+            "updated_at": datetime.now().isoformat()
+        }
+        leads.append(new_lead)
+        save_leads_to_file(leads, LEADS_FILE)
+        logger.info(f"Added lead {new_lead['id']}: {req.name} (status: {new_lead['status']})")
+        return {"success": True, "lead_id": new_lead['id']}
+    except Exception as e:
+        logger.error(f"Add lead failed: {e}")
+        raise HTTPException(500, f"Failed to add lead: {str(e)}")
+
+# NEW: Endpoint to list leads (for Streamlit)
+@app.get("/leads")
+async def get_leads():
     LEADS_FILE = "leads.json"
-    while True:
-        try:
-            if os.path.exists(LEADS_FILE):
-                with open(LEADS_FILE, "r") as f:
-                    leads = json.load(f)
-            else:
-                leads = []
-                with open(LEADS_FILE, "w") as f:
-                    json.dump(leads, f)
+    leads = load_leads_from_file(LEADS_FILE)
+    return {"leads": leads}
 
-            for lead in leads:
-                lead_id = lead.get("id")
-                should_call = lead.get("status") == "Call Pending"
-                if not should_call:
-                    sched_time = lead.get("scheduled_time")
-                    if sched_time:
-                        try:
-                            parsed_time = datetime.fromisoformat(sched_time.replace(" ", "T"))  # FIXED: Space to T
-                            if parsed_time <= datetime.now():
-                                should_call = True
-                        except ValueError as e:
-                            logger.warning(f"Invalid time for {lead_id}: {sched_time} ({e}). Skipping.")
-                            continue
+# Helpers (add these functions)
+def load_leads_from_file(file_path: str):
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
+            return json.load(f)
+    return []
 
-                if not should_call:
-                    continue
-
-                call_type = lead.get("call_type", "qualification")
-                prompt_key = lead.get("prompt_config_key", "chess_coach")
-                name = lead.get("name")
-                phone = lead.get("phone")
-
-                if not name or not phone:
-                    logger.error(f"Missing name/phone for {lead_id}; setting Failed.")
-                    lead["status"] = "Failed"
-                    continue
-
-                # Active calls check
-                active_sids = [sid for sid in ACTIVE_CALLS if await is_call_active(client, sid)]
-                skip = any(
-                    LEAD_CONTEXT_STORE.get(sid, {}).get("to_phone") == phone or 
-                    LEAD_CONTEXT_STORE.get(sid, {}).get("id") == lead_id 
-                    for sid in active_sids
-                )
-                if skip:
-                    continue
-
-                logger.info(f"Auto-calling {lead_id}: {name} ({prompt_key})")
-                async with CALL_RATE_LIMITER:
-                    try:
-                        call_sid = await make_outbound_call(
-                            to_phone=phone, name=name, call_type=call_type, lead=lead, prompt_config_key=prompt_key
-                        )
-                        ACTIVE_CALLS.add(call_sid)
-                        lead["status"] = "Called"
-                        lead["call_sid"] = call_sid
-                        # Skip CRM if placeholder
-                        if "your-crm-api.com" not in CRM_API_URL:
-                            await update_crm(lead_id, "", {}, {}, "", status="Called")
-                    except Exception as e:
-                        logger.error(f"Auto-call failed for {lead_id}: {e}")
-                        lead["status"] = "Failed"
-
-            with open(LEADS_FILE, "w") as f:
-                json.dump(leads, f, indent=2)
-
-            await asyncio.sleep(30)  # FIXED: 30s for testing (change to 300 later)
-        except Exception as e:
-            logger.error(f"Scheduler error: {e}")
-            await asyncio.sleep(30)
-
+def save_leads_to_file(leads: list, file_path: str):
+    with open(file_path, "w") as f:
+        json.dump(leads, f, indent=2)
 
 # Main entrypoint (updated to include scheduler)
 if __name__ == "__main__":

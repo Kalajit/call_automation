@@ -25181,6 +25181,26 @@ async def get_conversation(call_sid: str):
     raise HTTPException(status_code=404, detail="Conversation not found")
 
 
+# NEW: Endpoint to debug call status
+@app.get("/call_status/{call_sid}")
+async def get_call_status(call_sid: str):
+    try:
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        call = await asyncio.get_event_loop().run_in_executor(None, lambda: client.calls(call_sid).fetch())
+        return {
+            "call_sid": call.sid,
+            "status": call.status,
+            "to": call.to,
+            "from": call.from_,
+            "duration": call.duration,
+            "error_code": call.error_code,
+            "error_message": call.error_message
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch call status for {call_sid}: {e}")
+        raise HTTPException(500, f"Failed to fetch call status: {str(e)}")
+
+
 # ADDED n8n: request schema for outbound_call
 class OutboundCallRequest(BaseModel):
     to_phone: str
@@ -25559,6 +25579,40 @@ async def add_lead(req: AddLeadRequest):
     except Exception as e:
         logger.error(f"Add lead failed: {e}")
         raise HTTPException(500, f"Failed to add lead: {str(e)}")
+
+
+# NEW: Endpoint to update synthesizer voice
+class UpdateVoiceRequest(BaseModel):
+    voice: str
+
+@app.post("/update_voice")
+async def update_voice(req: UpdateVoiceRequest):
+    try:
+        global synthesizer_config
+        synthesizer_config = StreamElementsSynthesizerConfig.from_telephone_output_device(voice=req.voice)
+        logger.info(f"Updated synthesizer voice to: {req.voice}")
+        return {"success": True, "voice": req.voice}
+    except Exception as e:
+        logger.error(f"Failed to update voice: {e}")
+        raise HTTPException(500, f"Failed to update voice: {str(e)}")
+
+
+# NEW: Endpoint to delete a lead
+class DeleteLeadRequest(BaseModel):
+    lead_id: str
+
+@app.post("/delete_lead")
+async def delete_lead(req: DeleteLeadRequest):
+    try:
+        LEADS_FILE = "leads.json"
+        leads = load_leads_from_file(LEADS_FILE)
+        leads = [lead for lead in leads if lead["id"] != req.lead_id]
+        save_leads_to_file(leads, LEADS_FILE)
+        logger.info(f"Deleted lead {req.lead_id}")
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"Delete lead failed: {e}")
+        raise HTTPException(500, f"Failed to delete lead: {str(e)}")
 
 # NEW: Endpoint to list leads (for Streamlit)
 @app.get("/leads")

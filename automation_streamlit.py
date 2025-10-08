@@ -94,6 +94,10 @@ def list_conversations():
 
 # NEW: Auto-trigger first pending/due lead (called after refresh)
 def auto_trigger_pending(leads):
+    if "last_triggered" in st.session_state and time.time() - st.session_state.last_triggered < 60:
+        st.info("Waiting 60s before next auto-trigger.")
+        return
+    st.session_state.last_triggered = time.time()
     pending, due = check_pending_leads(leads)
     all_ready = pending + due
     if not all_ready:
@@ -259,7 +263,15 @@ elif page == "Leads Management":
                 st.json(lead)
                 # Delete: POST to backend if needed, but for now, warn (add /delete_lead endpoint later)
                 if st.button(f"Delete Lead {lead['id']}", key=f"del_{lead['id']}"):
-                    st.warning("Delete not implemented yet – add /delete_lead to backend.")
+                    try:
+                        response = requests.post(f"{BACKEND_URL}/delete_lead", json={"lead_id": lead['id']})
+                        if response.status_code == 200:
+                            st.success(f"Lead {lead['id']} deleted!")
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to delete lead: {response.text}")
+                    except Exception as e:
+                        st.error(f"Error deleting lead: {str(e)}")
     else:
         st.info("No leads yet.")
     
@@ -329,14 +341,20 @@ elif page == "Call Logs":
 elif page == "Settings":
     st.title("Settings")
     st.write("Configure AI voice and other options.")
-    
+
     selected = st.selectbox("TTS Voice (Gender - Accent)", VOICE_OPTIONS, index=0)
     selected_voice = selected.split(" (")[0]
-    st.info(f"Selected: {selected_voice}. To apply, update synthesizer_config in your code: voice='{selected_voice}'")
+    
+    if st.button("Save Changes"):
+        try:
+            response = requests.post(f"{BACKEND_URL}/update_voice", json={"voice": selected_voice})
+            if response.status_code == 200:
+                st.success(f"Voice updated to {selected_voice}! Applied to new calls.")
+            else:
+                st.error(f"Failed to update voice: {response.text}")
+        except Exception as e:
+            st.error(f"Error updating voice: {str(e)}")
     
     st.subheader("Current Configs (Read-Only)")
     st.write(f"Twilio Phone: {os.getenv('TWILIO_PHONE_NUMBER', 'Not set locally')}")
     st.write(f"Base URL: {os.getenv('BASE_URL', 'Not set locally')}")
-    
-    if st.button("Save Changes"):
-        st.success("Changes saved! Restart backend to apply voice.")

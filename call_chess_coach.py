@@ -25590,15 +25590,17 @@ class AddLeadRequest(BaseModel):
     def validate_scheduled_time(cls, value):
         if not value:
             return value
-        # Allow YYYY-MM-DDTHH:MM:SS with optional timezone
-        pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})?$'
+        # Allow YYYY-MM-DDTHH:MM:SS with or without timezone
+        pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}([+-]\d{2}:\d{2}|Z)?$'
         if not re.match(pattern, value):
             raise ValueError(f"Invalid scheduled_time format: {value}")
         try:
-            # Normalize to IST
-            fixed_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', value) + '+05:30'
-            datetime.fromisoformat(fixed_time)
-            return value  # Return original value; normalization happens in endpoint
+            # Test parsing by appending +05:30 if no timezone
+            test_time = value
+            if not (value.endswith('Z') or '+' in value or '-' in value):
+                test_time = value + '+05:30'
+            datetime.fromisoformat(test_time.replace('Z', '+00:00'))
+            return value  # Return original value; normalization in endpoint
         except ValueError:
             raise ValueError(f"Cannot parse scheduled_time: {value}")
 
@@ -25624,10 +25626,12 @@ async def add_lead(req: AddLeadRequest):
         final_scheduled_time = None
         if req.scheduled_time:
             try:
-                # Normalize scheduled_time: strip timezone and append +05:30
+                # Normalize to IST: append +05:30 if no timezone
                 fixed_time = req.scheduled_time.replace(" ", "T").replace("-", "T")
-                fixed_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', fixed_time)  # Strip any timezone
-                fixed_time += '+05:30'  # Append IST timezone
+                if not (fixed_time.endswith('Z') or '+' in fixed_time or '-' in fixed_time):
+                    fixed_time += '+05:30'
+                else:
+                    fixed_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', fixed_time) + '+05:30'
                 logger.info(f"Normalized scheduled_time: {fixed_time}")
                 datetime.fromisoformat(fixed_time)
                 final_scheduled_time = fixed_time

@@ -1,3 +1,4 @@
+
 import streamlit as st
 import requests
 import json
@@ -113,8 +114,11 @@ def check_pending_leads(leads: list) -> tuple[list, list]:
             pending.append(lead)
         elif lead.get("scheduled_time") and lead.get("status") == "Pending":
             try:
-                fixed = lead["scheduled_time"].replace(" ", "T").replace("-", "T")
-                sched_time = datetime.fromisoformat(fixed)
+                # Handle ISO 8601 format with or without timezone
+                sched_time_str = lead["scheduled_time"]
+                if not (sched_time_str.endswith('Z') or '+' in sched_time_str):
+                    sched_time_str += '+05:30'  # Assume IST if no timezone
+                sched_time = datetime.fromisoformat(sched_time_str)
                 if sched_time <= now:
                     due.append(lead)
             except ValueError:
@@ -179,12 +183,18 @@ def validate_phone(phone: str) -> bool:
     return bool(re.match(pattern, phone.replace(" ", "")))
 
 def validate_scheduled_time(scheduled_time: str) -> bool:
-    """Validate scheduled time format (ISO 8601)."""
+    """Validate scheduled time format (YYYY-MM-DDTHH:MM:SS[+HH:MM|Z])."""
     if not scheduled_time:
         return True
+    pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})?$'
+    if not re.match(pattern, scheduled_time):
+        return False
     try:
-        fixed = scheduled_time.replace(" ", "T").replace("-", "T")
-        datetime.fromisoformat(fixed)
+        # Validate parsing, allowing for missing timezone (will append later)
+        if not (scheduled_time.endswith('Z') or '+' in scheduled_time or '-' in scheduled_time):
+            datetime.fromisoformat(scheduled_time + '+05:30')
+        else:
+            datetime.fromisoformat(scheduled_time)
         return True
     except ValueError:
         return False
@@ -240,8 +250,9 @@ elif page == "Leads Management":
         phone = st.text_input("Phone", placeholder="+919876543210")
         prompt_key = st.selectbox("Prompt Type", PROMPT_KEYS)
         call_type = st.selectbox("Call Type", ["qualification", "reminder", "payment"])
-        scheduled_time = st.text_input("Scheduled Time (YYYY-MM-DD HH:MM:SS)", placeholder="2025-10-08 14:30:00")
-        details = st.text_area("Additional Details (JSON)", "{}")
+        # Single text input for date and time with timezone
+        scheduled_time = st.text_input("Scheduled Time (YYYY-MM-DDTHH:MM:SS+05:30)", placeholder="2025-10-08T14:30:00+05:30")
+        details_input = st.text_area("Additional Details", "")  # Plain text
         submit_button = st.form_submit_button("Add Lead")
         
         if submit_button:
@@ -251,16 +262,17 @@ elif page == "Leads Management":
                     st.error("Name cannot be empty.")
                 elif not validate_phone(phone):
                     st.error("Invalid phone number. Use format: +919876543210")
-                elif not validate_scheduled_time(scheduled_time):
-                    st.error("Invalid scheduled time. Use format: YYYY-MM-DD HH:MM:SS")
+                elif scheduled_time and not validate_scheduled_time(scheduled_time):
+                    st.error("Invalid scheduled time. Use format: YYYY-MM-DDTHH:MM:SS+05:30 (e.g., 2025-10-08T14:30:00+05:30)")
                 else:
-                    try:
-                        details_dict = json.loads(details)
-                    except json.JSONDecodeError:
-                        st.error("Invalid JSON in details.")
-                        details_dict = {}
+                    # Append IST timezone if missing
+                    final_scheduled_time = scheduled_time
+                    if scheduled_time and not (scheduled_time.endswith('Z') or '+' in scheduled_time or '-' in scheduled_time):
+                        final_scheduled_time = scheduled_time + '+05:30'
+                    # Wrap plain text details in a dictionary
+                    details = {"text": details_input.strip()} if details_input.strip() else {}
                     status = "Pending" if scheduled_time else "Call Pending"
-                    lead_id = add_lead_to_backend(name, phone, prompt_key, call_type, scheduled_time, status, details_dict)
+                    lead_id = add_lead_to_backend(name, phone, prompt_key, call_type, final_scheduled_time, status, details)
                     if lead_id:
                         st.success(f"Lead added successfully! ID: {lead_id}")
                         st.session_state.leads_updated = time.time()  # Trigger lead refresh

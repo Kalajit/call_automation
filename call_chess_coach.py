@@ -24974,7 +24974,7 @@ async def outbound_scheduler():
     logger.info("Starting outbound scheduler (polling every 30s)")
     while True:
         try:
-            leads = load_leads_from_file(LEADS_FILE)  # Use helper
+            leads = load_leads_from_file(LEADS_FILE)
             logger.info(f"Scheduler: Loaded {len(leads)} leads")
             
             for lead in leads[:]:  # Copy to avoid mod during iter
@@ -24983,8 +24983,10 @@ async def outbound_scheduler():
                 if not should_call and lead.get("scheduled_time"):
                     try:
                         fixed_time = lead["scheduled_time"].replace(" ", "T").replace("-", "T")
+                        if not (fixed_time.endswith('Z') or '+' in fixed_time or '-' in fixed_time):
+                            fixed_time += '+00:00'  # Assume UTC if no timezone
                         parsed_time = datetime.fromisoformat(fixed_time)
-                        if parsed_time <= datetime.now(parsed_time.tzinfo):  # FIXED: Handle timezone
+                        if parsed_time <= datetime.now(parsed_time.tzinfo):
                             should_call = True
                             logger.info(f"Lead {lead_id} due now: {lead['scheduled_time']}")
                     except ValueError as e:
@@ -25031,9 +25033,9 @@ async def outbound_scheduler():
                         lead["status"] = "Failed"
                         METRICS["errors"]["general"] += 1
 
-                save_leads_to_file(leads, LEADS_FILE)  # Save after each lead update
+                save_leads_to_file(leads, LEADS_FILE)
             
-            await asyncio.sleep(30)  # FIXED: 30s poll
+            await asyncio.sleep(30)
         except Exception as e:
             logger.error(f"❌ Scheduler error: {e}")
             await asyncio.sleep(30)
@@ -25584,7 +25586,7 @@ class AddLeadRequest(BaseModel):
 @app.post("/add_lead")
 async def add_lead(req: AddLeadRequest):
     try:
-        # NEW: Validate inputs
+        # Validate inputs
         if not req.name.strip():
             raise HTTPException(400, "Name cannot be empty")
         phone = normalize_e164(req.phone)
@@ -25596,7 +25598,10 @@ async def add_lead(req: AddLeadRequest):
             raise HTTPException(400, f"Invalid call_type: {req.call_type}")
         if req.scheduled_time:
             try:
+                # Normalize scheduled_time: append +00:00 if no timezone
                 fixed_time = req.scheduled_time.replace(" ", "T").replace("-", "T")
+                if not (fixed_time.endswith('Z') or '+' in fixed_time or '-' in fixed_time):
+                    fixed_time += '+00:00'  # Assume UTC if no timezone
                 datetime.fromisoformat(fixed_time)
             except ValueError:
                 raise HTTPException(400, f"Invalid scheduled_time format: {req.scheduled_time}")
@@ -25604,11 +25609,13 @@ async def add_lead(req: AddLeadRequest):
         LEADS_FILE = "leads.json"
         leads = load_leads_from_file(LEADS_FILE)
         
-        # FIXED: Only set Call Pending if no scheduled_time or time is now/past
+        # Set Call Pending if no scheduled_time or time is now/past
         status = req.status
         if req.scheduled_time:
             try:
                 fixed_time = req.scheduled_time.replace(" ", "T").replace("-", "T")
+                if not (fixed_time.endswith('Z') or '+' in fixed_time or '-' in fixed_time):
+                    fixed_time += '+00:00'  # Assume UTC
                 sched_time = datetime.fromisoformat(fixed_time)
                 if sched_time <= datetime.now(sched_time.tzinfo):
                     status = "Call Pending"

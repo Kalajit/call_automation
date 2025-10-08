@@ -24982,13 +24982,12 @@ async def outbound_scheduler():
                 should_call = lead.get("status") == "Call Pending"
                 if not should_call and lead.get("scheduled_time"):
                     try:
-                        # Normalize to IST: strip timezone and append +05:30
-                        fixed_time = lead["scheduled_time"].replace(" ", "T").replace("-", "T")
-                        fixed_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', fixed_time) + '+05:30'
-                        parsed_time = datetime.fromisoformat(fixed_time)
+                        # Append +05:30 for IST comparison
+                        scheduled_time = lead["scheduled_time"] + '+05:30'
+                        parsed_time = datetime.fromisoformat(scheduled_time)
                         if parsed_time <= datetime.now(parsed_time.tzinfo):
                             should_call = True
-                            logger.info(f"Lead {lead_id} due now: {lead['scheduled_time']} (normalized: {fixed_time})")
+                            logger.info(f"Lead {lead_id} due now: {lead['scheduled_time']} (normalized: {scheduled_time})")
                     except ValueError as e:
                         logger.warning(f"Invalid time for {lead_id}: {lead['scheduled_time']} ({str(e)}). Skipping.")
                         continue
@@ -25590,17 +25589,14 @@ class AddLeadRequest(BaseModel):
     def validate_scheduled_time(cls, value):
         if not value:
             return value
-        # Allow YYYY-MM-DDTHH:MM:SS with or without timezone
-        pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}([+-]\d{2}:\d{2}|Z)?$'
+        # Accept exactly YYYY-MM-DDTHH:MM:SS
+        pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$'
         if not re.match(pattern, value):
             raise ValueError(f"Invalid scheduled_time format: {value}")
         try:
-            # Test parsing by appending +05:30 if no timezone
-            test_time = value
-            if not (value.endswith('Z') or '+' in value or '-' in value):
-                test_time = value + '+05:30'
-            datetime.fromisoformat(test_time.replace('Z', '+00:00'))
-            return value  # Return original value; normalization in endpoint
+            # Test parsing with +05:30 to ensure valid date
+            datetime.fromisoformat(value + '+05:30')
+            return value  # Return original value unchanged
         except ValueError:
             raise ValueError(f"Cannot parse scheduled_time: {value}")
 
@@ -25623,21 +25619,9 @@ async def add_lead(req: AddLeadRequest):
             logger.error(f"Validation failed: Invalid call_type: {req.call_type}")
             raise HTTPException(400, f"Invalid call_type: {req.call_type}")
         
-        final_scheduled_time = None
-        if req.scheduled_time:
-            try:
-                # Normalize to IST: append +05:30 if no timezone
-                fixed_time = req.scheduled_time.replace(" ", "T").replace("-", "T")
-                if not (fixed_time.endswith('Z') or '+' in fixed_time or '-' in fixed_time):
-                    fixed_time += '+05:30'
-                else:
-                    fixed_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', fixed_time) + '+05:30'
-                logger.info(f"Normalized scheduled_time: {fixed_time}")
-                datetime.fromisoformat(fixed_time)
-                final_scheduled_time = fixed_time
-            except ValueError as e:
-                logger.error(f"Validation failed: Invalid scheduled_time format: {req.scheduled_time} ({str(e)})")
-                raise HTTPException(400, f"Invalid scheduled_time format: {req.scheduled_time}")
+        final_scheduled_time = req.scheduled_time  # Store as-is
+        if final_scheduled_time:
+            logger.info(f"Stored scheduled_time as-is: {final_scheduled_time}")
         
         LEADS_FILE = "leads.json"
         leads = load_leads_from_file(LEADS_FILE)
@@ -25646,12 +25630,13 @@ async def add_lead(req: AddLeadRequest):
         status = req.status
         if final_scheduled_time:
             try:
-                sched_time = datetime.fromisoformat(final_scheduled_time)
+                # Append +05:30 only for comparison
+                sched_time = datetime.fromisoformat(final_scheduled_time + '+05:30')
                 if sched_time <= datetime.now(sched_time.tzinfo):
                     status = "Call Pending"
                     logger.info(f"Scheduled time {final_scheduled_time} is now/past; setting status to Call Pending")
             except ValueError as e:
-                logger.error(f"Failed to parse normalized time {final_scheduled_time}: {str(e)}")
+                logger.error(f"Failed to parse time {final_scheduled_time}: {str(e)}")
                 status = "Call Pending"  # Fallback
         else:
             status = "Call Pending"  # Immediate call if no scheduled_time
@@ -25663,7 +25648,7 @@ async def add_lead(req: AddLeadRequest):
             "phone": phone,
             "prompt_config_key": req.prompt_config_key,
             "call_type": req.call_type,
-            "scheduled_time": final_scheduled_time,
+            "scheduled_time": final_scheduled_time,  # Store unchanged
             "status": status,
             "details": req.details,
             "updated_at": datetime.now().isoformat()

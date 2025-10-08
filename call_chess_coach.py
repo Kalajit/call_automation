@@ -23669,7 +23669,7 @@ import aiofiles
 
 import websockets
 
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import uuid
 from asyncio import create_task
 
@@ -24204,11 +24204,22 @@ SESSION_TO_CALL_SID: dict = {}
 CONVERSATION_STORE_LOCK = asyncio.Lock()
 
 METRICS = {
-    "calls_initiated": Counter({"qualification": 0, "reminder": 0, "payment": 0}),
-    "calls_completed": Counter({"audio_saved": 0, "twilio_audio_converted": 0}),
-    "errors": Counter({"invalid_phone": 0, "duplicate_call": 0, "http_error": 0, "general": 0, "call_status": 0, "audio_save_failed": 0, "twilio_audio_conversion_failed": 0, "conversation_flush_failed": 0, "twilio_call_failed": 0}),
-    "api_response_times": []
+    "calls_initiated": {"qualification": 0, "reminder": 0, "payment": 0},
+    "calls_completed": {"qualification": 0, "reminder": 0, "payment": 0, "audio_saved": 0},
+    "errors": {
+        "general": 0,
+        "invalid_phone": 0,
+        "twilio_call_failed": 0,
+        "call_status": 0,
+        "transcriber_missing": 0,
+        "audio_save_failed": 0
+    },
+    "active_calls": 0,
+    "api_response_times": []  # NEW: Initialize api_response_times
 }
+
+
+ACTIVE_CALLS_LOCK = asyncio.Lock()
 
 # Sentiment Analysis Chain (using Groq LLM)
 sentiment_prompt = PromptTemplate(
@@ -24956,6 +24967,10 @@ class CustomAgentFactory:
 class CustomSynthesizerFactory:
     def create_synthesizer(self, synthesizer_config: SynthesizerConfig) -> BaseSynthesizer:
         logger.debug(f"Creating synthesizer with config: {synthesizer_config}")
+        if synthesizer_config is None:
+            voice = load_voice_config()  # Load from VOICE_FILE
+            synthesizer_config = StreamElementsSynthesizerConfig.from_telephone_output_device(voice=voice)
+            logger.debug(f"No config provided, using voice: {voice}")
         if isinstance(synthesizer_config, StreamElementsSynthesizerConfig):
             logger.debug("Creating StreamElementsSynthesizer")
             return StreamElementsSynthesizer(synthesizer_config)
@@ -24969,6 +24984,7 @@ app = FastAPI()
 
 
 async def outbound_scheduler():
+    # UPDATED: Fix calls repeating and status updates
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     LEADS_FILE = "leads.json"
     logger.info("Starting outbound scheduler (polling every 30s)")
@@ -24976,39 +24992,34 @@ async def outbound_scheduler():
         try:
             leads = load_leads_from_file(LEADS_FILE)
             logger.info(f"Scheduler: Loaded {len(leads)} leads")
-            
-            for lead in leads[:]:  # Copy to avoid mod during iter
+            for lead in leads[:]:
                 lead_id = lead.get("id")
                 should_call = lead.get("status") == "Call Pending"
                 if not should_call:
                     sched_time = lead.get("scheduled_time")
                     if sched_time:
                         try:
-                            # FIXED: Robust parsing (space or - to T)
                             fixed_time = sched_time.replace(" ", "T").replace("-", "T")
-                            parsed_time = datetime.fromisoformat(fixed_time)
-                            if parsed_time <= datetime.now():
+                            parsed_time = datetime.fromisoformat(fixed_time + '+05:30')
+                            if parsed_time <= datetime.now(timezone(timedelta(hours=5, minutes=30))):
                                 should_call = True
                                 logger.info(f"Lead {lead_id} due now: {sched_time}")
                         except ValueError as e:
                             logger.warning(f"Invalid time for {lead_id}: {sched_time} ({e}). Skipping.")
                             continue
-
                 if not should_call:
                     continue
-
                 call_type = lead.get("call_type", "qualification")
                 prompt_key = lead.get("prompt_config_key", "chess_coach")
                 name = lead.get("name")
                 phone = lead.get("phone")
-
                 if not name or not phone:
                     logger.error(f"Missing name/phone for {lead_id}; setting Failed.")
                     lead["status"] = "Failed"
+                    lead["updated_at"] = datetime.now().isoformat()
                     save_leads_to_file(leads, LEADS_FILE)
+                    METRICS["errors"]["invalid_phone"] += 1
                     continue
-
-                # Active calls check
                 active_sids = [sid for sid in ACTIVE_CALLS if await is_call_active(client, sid)]
                 skip = any(
                     LEAD_CONTEXT_STORE.get(sid, {}).get("to_phone") == phone or 
@@ -25017,8 +25028,8 @@ async def outbound_scheduler():
                 )
                 if skip:
                     logger.info(f"Skipping {lead_id}: Active call")
+                    METRICS["errors"]["duplicate_call"] += 1
                     continue
-
                 logger.info(f"🚀 Auto-calling {lead_id}: {name} ({phone}) - {prompt_key}")
                 async with CALL_RATE_LIMITER:
                     try:
@@ -25028,16 +25039,16 @@ async def outbound_scheduler():
                         ACTIVE_CALLS.add(call_sid)
                         lead["status"] = "Called"
                         lead["call_sid"] = call_sid
+                        lead["updated_at"] = datetime.now().isoformat()
                         METRICS["calls_initiated"][call_type] += 1
                         logger.info(f"✅ Called {lead_id}: SID {call_sid}")
                     except Exception as e:
                         logger.error(f"❌ Auto-call failed for {lead_id}: {e}")
                         lead["status"] = "Failed"
-                        METRICS["errors"]["general"] += 1
-
-                save_leads_to_file(leads, LEADS_FILE)  # Save after each lead update
-            
-            await asyncio.sleep(30)  # FIXED: 30s poll
+                        lead["updated_at"] = datetime.now().isoformat()
+                        METRICS["errors"]["twilio_call_failed"] += 1
+                    save_leads_to_file(leads, LEADS_FILE)
+            await asyncio.sleep(30)
         except Exception as e:
             logger.error(f"❌ Scheduler error: {e}")
             await asyncio.sleep(30)
@@ -25097,6 +25108,7 @@ def save_voice_config(voice: str):
         json.dump({"voice": voice}, f, indent=2)
 
 # FIXED: Initialize synthesizer with persisted voice
+# Initialize synthesizer with persisted voice
 synthesizer_config = StreamElementsSynthesizerConfig.from_telephone_output_device(
     voice=load_voice_config()
 )
@@ -25179,25 +25191,31 @@ app.include_router(telephony_server.get_router())
 # NEW: Endpoint to handle Twilio call status callbacks for inbound calls
 @app.post("/call_status")
 async def call_status(request: Request):
+    # UPDATED: Ensure call status updates are persisted
     try:
         form_data = await request.form()
         call_sid = form_data.get("CallSid")
         call_status = form_data.get("CallStatus")
         logger.debug(f"Received call status: CallSid={call_sid}, CallStatus={call_status}")
-        if call_status == "completed":
-            logger.info(f"Call {call_sid} completed")
-            ACTIVE_CALLS.discard(call_sid)  # Remove from active calls
-            METRICS["calls_completed"][LEAD_CONTEXT_STORE.get(call_sid, {}).get("call_type", "unknown")] += 1
-            # NEW: Update lead status to Completed
-            LEADS_FILE = "leads.json"
-            leads = load_leads_from_file(LEADS_FILE)
-            for lead in leads:
-                if lead.get("call_sid") == call_sid:
+        LEADS_FILE = "leads.json"
+        leads = load_leads_from_file(LEADS_FILE)
+        lead_updated = False
+        for lead in leads:
+            if lead.get("call_sid") == call_sid:
+                if call_status == "completed":
                     lead["status"] = "Completed"
-                    lead["updated_at"] = datetime.now().isoformat()
-                    logger.info(f"Updated lead {lead['id']} status to Completed")
-                    break
+                    METRICS["calls_completed"][lead.get("call_type", "unknown")] += 1
+                elif call_status in ["failed", "busy", "no-answer"]:
+                    lead["status"] = "Failed"
+                    METRICS["errors"]["twilio_call_failed"] += 1
+                lead["updated_at"] = datetime.now().isoformat()
+                lead_updated = True
+                logger.info(f"Updated lead {lead['id']} status to {lead['status']}")
+                break
+        if lead_updated:
             save_leads_to_file(leads, LEADS_FILE)
+        if call_status == "completed":
+            ACTIVE_CALLS.discard(call_sid)
         return {"ok": True}
     except Exception as e:
         METRICS["errors"]["call_status"] += 1
@@ -25310,6 +25328,126 @@ async def outbound_call(req: OutboundCallRequest):
 
 
 
+# async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dict = None, prompt_config_key: str = None):
+#     try:
+#         if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, BASE_URL]):
+#             logger.error("Missing required Twilio environment variables")
+#             METRICS["errors"]["general"] += 1
+#             raise ValueError("Missing required Twilio environment variables")
+
+#         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+#         twilio_base_url = f"https://{BASE_URL}"
+        
+#         if not prompt_config_key or prompt_config_key not in PROMPT_CONFIGS:
+#             logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Falling back to 'hospital_receptionist'")
+#             prompt_config_key = "chess_coach"  # Updated to match logs
+#         prompt_config = PROMPT_CONFIGS[prompt_config_key]
+#         initial_message = prompt_config["initial_message"].replace("{{name}}", name or "there")
+#         logger.debug(f"Using prompt_config_key: {prompt_config_key}, name: {name}, initial_message: {initial_message}")
+        
+#         if call_type == "reminder":
+#             initial_message = f"This is a reminder for your demo on {lead.get('demo_date', time.strftime('%Y-%m-%d %H:%M IST', time.localtime(time.time() + 86400)))}. Ready?"
+#         elif call_type == "payment":
+#             initial_message = f"Payment reminder for ₹500 due by {lead.get('due_date', time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400)))}. Settled?"
+        
+#         agent_config = CustomLangchainAgentConfig(
+#             initial_message=BaseMessage(text=initial_message),
+#             prompt_preamble=prompt_config["prompt_preamble"],
+#             model_name="llama-3.1-8b-instant",
+#             api_key=GROQ_API_KEY,
+#             provider="groq"
+#         )
+        
+#         call_params = {
+#             "to": to_phone,
+#             "from_": TWILIO_PHONE_NUMBER,
+#             "url": f"{twilio_base_url}/inbound_call",
+#             "status_callback": f"{twilio_base_url}/call_status",
+#             "status_callback_method": "POST",
+#             "status_callback_event": ["initiated", "ringing", "answered", "completed"],
+#             "record": True,
+#             "recording_channels": "dual",
+#             "recording_status_callback": f"{twilio_base_url}/recording_status",
+#             "recording_status_callback_method": "POST"
+#         }
+#         logger.debug(f"Twilio call parameters: {call_params}")
+        
+#         @retry(
+#             stop=stop_after_attempt(3),
+#             wait=wait_exponential(multiplier=1, min=1, max=10),
+#             retry=retry_if_exception_type(Exception),
+#             before_sleep=lambda retry_state: logger.warning(f"Retrying Twilio call (attempt {retry_state.attempt_number})")
+#         )
+#         def sync_make_call(client, call_params):
+#             return client.calls.create(**call_params)
+
+#         try:
+#             call = await asyncio.get_event_loop().run_in_executor(
+#                 None,
+#                 lambda: sync_make_call(client, call_params)
+#             )
+#             call_sid = call.sid
+#             ACTIVE_CALLS.add(call_sid)  # Track active call
+#             METRICS["calls_initiated"][call_type] += 1  # Track successful initiation
+#         except Exception as twilio_error:
+#             logger.error(f"Twilio API call failed after retries: {str(twilio_error)}", exc_info=True)
+#             METRICS["errors"]["twilio_call_failed"] += 1
+#             raise HTTPException(status_code=500, detail=f"Twilio API error: {str(twilio_error)}")
+        
+#         # Await the save_config coroutine
+#         await config_manager.save_config(f"agent_{call_sid}", {
+#             "initial_message": agent_config.initial_message.text,
+#             "prompt_preamble": agent_config.prompt_preamble,
+#             "model_name": agent_config.model_name,
+#             "api_key": agent_config.api_key,
+#             "provider": agent_config.provider,
+#             "lead": lead or {},
+#             "prompt_config_key": prompt_config_key,
+#             "name": name,
+#             "conversation_id": call_sid  # Ensure conversation_id is stored
+#         })
+#         logger.info(f"Saved agent config for CallSid: {call_sid}, prompt_config_key: {prompt_config_key}, name: {name}")
+        
+#         async def _flush_to_disk(conversation_id: str):
+#             try:
+#                 async with CONVERSATION_STORE_LOCK:
+#                     payload = CONVERSATION_STORE.get(conversation_id)
+#                     if not payload:
+#                         logger.warning(f"No payload found for conversation_id: {conversation_id}")
+#                         return
+#                     out_path = CONVERSATIONS_DIR / f"{conversation_id}.json"
+#                     async with aiofiles.open(out_path, "w", encoding="utf-8") as f:
+#                         await f.write(json.dumps(payload, ensure_ascii=False, indent=2))
+#                     logger.debug(f"Flushed conversation {conversation_id} to {out_path}")
+#             except Exception as e:
+#                 logger.error(f"Flush to disk failed for {conversation_id}: {e}", exc_info=True)
+#                 METRICS["errors"]["conversation_flush_failed"] += 1
+
+#         async with CONVERSATION_STORE_LOCK:
+#             lead = lead or {}
+#             lead.update({"to_phone": to_phone, "call_type": call_type, "prompt_config_key": prompt_config_key, "name": name})
+#             LEAD_CONTEXT_STORE[call_sid] = lead
+#             CONVERSATION_STORE[call_sid] = {
+#                 "conversation_id": call_sid,
+#                 "updated_at": int(time.time() * 1000),
+#                 "lead": lead,
+#                 "slots": {},
+#                 "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time() * 1000)}]
+#             }
+#             await _flush_to_disk(call_sid)  # Persist to disk immediately
+#         logger.debug(f"Updated LEAD_CONTEXT_STORE and CONVERSATION_STORE for CallSid: {call_sid}")
+        
+#         return call_sid
+#     except Exception as e:
+#         logger.error(f"make_outbound_call failed: {str(e)}", exc_info=True)
+#         if 'call_sid' in locals():
+#             ACTIVE_CALLS.discard(call_sid)  # Clean up on failure
+#         METRICS["errors"]["general"] += 1
+#         raise HTTPException(status_code=500, detail=f"Failed to initiate call: {str(e)}")
+
+
+
+
 async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dict = None, prompt_config_key: str = None):
     try:
         if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, BASE_URL]):
@@ -25321,8 +25459,8 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
         twilio_base_url = f"https://{BASE_URL}"
         
         if not prompt_config_key or prompt_config_key not in PROMPT_CONFIGS:
-            logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Falling back to 'hospital_receptionist'")
-            prompt_config_key = "chess_coach"  # Updated to match logs
+            logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Falling back to 'chess_coach'")
+            prompt_config_key = "chess_coach"  # Fixed log to match fallback
         prompt_config = PROMPT_CONFIGS[prompt_config_key]
         initial_message = prompt_config["initial_message"].replace("{{name}}", name or "there")
         logger.debug(f"Using prompt_config_key: {prompt_config_key}, name: {name}, initial_message: {initial_message}")
@@ -25331,6 +25469,10 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
             initial_message = f"This is a reminder for your demo on {lead.get('demo_date', time.strftime('%Y-%m-%d %H:%M IST', time.localtime(time.time() + 86400)))}. Ready?"
         elif call_type == "payment":
             initial_message = f"Payment reminder for ₹500 due by {lead.get('due_date', time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400)))}. Settled?"
+        
+        # NEW: Load voice configuration to ensure consistency
+        voice = load_voice_config()
+        logger.debug(f"Loaded voice configuration: {voice}")
         
         agent_config = CustomLangchainAgentConfig(
             initial_message=BaseMessage(text=initial_message),
@@ -25369,7 +25511,8 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
                 lambda: sync_make_call(client, call_params)
             )
             call_sid = call.sid
-            ACTIVE_CALLS.add(call_sid)  # Track active call
+            async with asyncio.Lock():  # NEW: Lock for ACTIVE_CALLS
+                ACTIVE_CALLS.add(call_sid)  # Track active call
             METRICS["calls_initiated"][call_type] += 1  # Track successful initiation
         except Exception as twilio_error:
             logger.error(f"Twilio API call failed after retries: {str(twilio_error)}", exc_info=True)
@@ -25386,9 +25529,10 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
             "lead": lead or {},
             "prompt_config_key": prompt_config_key,
             "name": name,
-            "conversation_id": call_sid  # Ensure conversation_id is stored
+            "conversation_id": call_sid,  # Ensure conversation_id is stored
+            "voice": voice  # NEW: Store voice configuration
         })
-        logger.info(f"Saved agent config for CallSid: {call_sid}, prompt_config_key: {prompt_config_key}, name: {name}")
+        logger.info(f"Saved agent config for CallSid: {call_sid}, prompt_config_key: {prompt_config_key}, name: {name}, voice: {voice}")
         
         async def _flush_to_disk(conversation_id: str):
             try:
@@ -25407,14 +25551,15 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
 
         async with CONVERSATION_STORE_LOCK:
             lead = lead or {}
-            lead.update({"to_phone": to_phone, "call_type": call_type, "prompt_config_key": prompt_config_key, "name": name})
+            lead.update({"to_phone": to_phone, "call_type": call_type, "prompt_config_key": prompt_config_key, "name": name, "voice": voice})
             LEAD_CONTEXT_STORE[call_sid] = lead
             CONVERSATION_STORE[call_sid] = {
                 "conversation_id": call_sid,
                 "updated_at": int(time.time() * 1000),
                 "lead": lead,
                 "slots": {},
-                "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time() * 1000)}]
+                "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time() * 1000)}],
+                "twilio_audio_url": None  # NEW: Ensure twilio_audio_url is included
             }
             await _flush_to_disk(call_sid)  # Persist to disk immediately
         logger.debug(f"Updated LEAD_CONTEXT_STORE and CONVERSATION_STORE for CallSid: {call_sid}")
@@ -25423,7 +25568,8 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
     except Exception as e:
         logger.error(f"make_outbound_call failed: {str(e)}", exc_info=True)
         if 'call_sid' in locals():
-            ACTIVE_CALLS.discard(call_sid)  # Clean up on failure
+            async with asyncio.Lock():  # NEW: Lock for ACTIVE_CALLS
+                ACTIVE_CALLS.discard(call_sid)  # Clean up on failure
         METRICS["errors"]["general"] += 1
         raise HTTPException(status_code=500, detail=f"Failed to initiate call: {str(e)}")
 
@@ -25486,22 +25632,25 @@ async def get_metrics():
 
 @app.get("/conversations")
 async def list_conversations_endpoint():
+    # UPDATED: Ensure all conversation data is returned for frontend
     convs = []
     for file in os.listdir(CONVERSATIONS_DIR):
         if file.endswith(".json"):
             path = CONVERSATIONS_DIR / file
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 convs.append({
                     "call_sid": data["conversation_id"],
                     "name": data["lead"].get("name", "Unknown"),
                     "phone": data["lead"].get("to_phone", "Unknown"),
                     "type": data["lead"].get("call_type", "Unknown"),
-                    "summary": data.get("summary", {}).get("summary", "No summary"),
+                    "summary": data.get("summary", {}).get("summary", "No summary available"),
                     "sentiment": data.get("sentiment", {}).get("sentiment", "Neutral"),
-                    "audio_url": data.get("twilio_audio_url", None)
+                    "audio_url": data.get("twilio_audio_url", None) or data.get("audio_url", None),
+                    "transcript": data.get("transcript", "No transcript available")
                 })
     return {"conversations": convs}
+
 
 
 
@@ -25656,10 +25805,38 @@ class UpdateVoiceRequest(BaseModel):
 @app.post("/update_voice")
 async def update_voice(req: UpdateVoiceRequest):
     try:
-        global synthesizer_config
+        global synthesizer_config, telephony_server
         synthesizer_config = StreamElementsSynthesizerConfig.from_telephone_output_device(voice=req.voice)
-        save_voice_config(req.voice)  # NEW: Persist voice
-        logger.info(f"Updated synthesizer voice to: {req.voice}")
+        save_voice_config(req.voice)
+        telephony_server = TelephonyServer(
+            base_url=BASE_URL,
+            config_manager=config_manager,
+            inbound_call_configs=[
+                TwilioInboundCallConfig(
+                    url="/inbound_call",
+                    twilio_config=twilio_config,
+                    agent_config=get_default_agent_config(),
+                    synthesizer_config=synthesizer_config,
+                    transcriber_config=transcriber_config,
+                    twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
+    <Pause length="15"/>
+    <Redirect method="POST">/inbound_call</Redirect>
+</Response>''',
+                    record=True,
+                    status_callback=f"https://{BASE_URL}/call_status",
+                    status_callback_method="POST",
+                    status_callback_event=["initiated", "ringing", "answered", "completed"],
+                    recording_status_callback=f"https://{BASE_URL}/recording_status",
+                    recording_status_callback_method="POST"
+                )
+            ],
+            agent_factory=CustomAgentFactory(),
+            synthesizer_factory=CustomSynthesizerFactory(),
+            events_manager=ChessEventsManager()
+        )
+        logger.info(f"Updated synthesizer voice to: {req.voice} and reinitialized TelephonyServer")
         return {"success": True, "voice": req.voice}
     except Exception as e:
         logger.error(f"Failed to update voice: {e}")
@@ -25690,16 +25867,25 @@ async def get_leads():
     leads = load_leads_from_file(LEADS_FILE)
     return {"leads": leads}
 
-# Helpers (add these functions)
-def load_leads_from_file(file_path: str):
+
+@app.get("/check_active_call/{lead_id}")
+async def check_active_call(lead_id: str):
+    try:
+        is_active = any(LEAD_CONTEXT_STORE.get(sid, {}).get("id") == lead_id for sid in ACTIVE_CALLS)
+        return {"is_active": is_active}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error checking active call: {str(e)}")
+
+
+async def load_leads_from_file(file_path: str):
     if os.path.exists(file_path):
-        with open(file_path, "r") as f:
-            return json.load(f)
+        async with aiofiles.open(file_path, "r") as f:
+            return json.loads(await f.read())
     return []
 
-def save_leads_to_file(leads: list, file_path: str):
-    with open(file_path, "w") as f:
-        json.dump(leads, f, indent=2)
+async def save_leads_to_file(leads: list, file_path: str):
+    async with aiofiles.open(file_path, "w") as f:
+        await f.write(json.dumps(leads, indent=2))
 
 # Main entrypoint (updated to include scheduler)
 if __name__ == "__main__":

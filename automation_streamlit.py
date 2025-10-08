@@ -495,11 +495,16 @@ def list_conversations() -> list:
     """Fetch conversation summaries from the backend."""
     try:
         response = requests.get(f"{BACKEND_URL}/conversations", timeout=10)
-        return response.json().get("conversations", []) if response.status_code == 200 else []
+        if response.status_code == 200:
+            return response.json().get("conversations", [])
+        else:
+            st.error(f"Failed to fetch conversations: {response.text}")
+            return []
     except Exception as e:
         st.error(f"Failed to fetch conversations: {str(e)}")
         return []
 
+# frontend.py
 def auto_trigger_pending(leads: list):
     """Auto-trigger calls for pending or due leads."""
     if "last_triggered" in st.session_state and time.time() - st.session_state.last_triggered < 60:
@@ -507,15 +512,30 @@ def auto_trigger_pending(leads: list):
         return
     st.session_state.last_triggered = time.time()
     pending, due = check_pending_leads(leads)
-    all_ready = pending + due
+    all_ready = [lead for lead in (pending + due) if lead.get("status") in ["Pending", "Call Pending"]]
     if not all_ready:
+        st.info("No leads ready for calling.")
         return
     first_lead = all_ready[0]
+    lead_id = first_lead.get("id")
     name = first_lead.get("name", "Unknown")
     phone = first_lead.get("phone", "")
     prompt_key = first_lead.get("prompt_config_key", "chess_coach")
     call_type = first_lead.get("call_type", "qualification")
     lead_data = first_lead.copy()
+    
+    # Check if lead is already being called via backend API
+    try:
+        response = requests.get(f"{BACKEND_URL}/check_active_call/{lead_id}", timeout=10)
+        if response.status_code == 200 and response.json().get("is_active", False):
+            st.info(f"Lead {name} already has an active call.")
+            return
+        elif response.status_code != 200:
+            st.warning(f"Failed to check active call status for {name}: {response.text}")
+    except Exception as e:
+        st.error(f"Failed to check active call status for {name}: {str(e)}")
+        return
+
     payload = {
         "to_phone": phone,
         "name": name,
@@ -529,10 +549,13 @@ def auto_trigger_pending(leads: list):
             data = response.json()
             st.success(f"🚀 Auto-started call for {name}! SID: {data.get('call_sid', 'Unknown')}")
             st.info(f"Details: {call_type} via {prompt_key}")
+            # Update lead status locally
+            update_lead_status(lead_id, "Called")
         else:
             st.error(f"Auto-trigger failed for {name}: {response.text}")
     except Exception as e:
         st.error(f"Auto-trigger failed for {name}: {str(e)}")
+
 
 def validate_phone(phone: str) -> bool:
     """Validate phone number format."""
@@ -595,6 +618,7 @@ if page == "Dashboard":
     else:
         st.info("No pending or due calls.")
 
+# frontend.py
 elif page == "Leads Management":
     st.header("Leads Management")
     
@@ -605,38 +629,33 @@ elif page == "Leads Management":
         phone = st.text_input("Phone", placeholder="+919876543210")
         prompt_key = st.selectbox("Prompt Type", PROMPT_KEYS)
         call_type = st.selectbox("Call Type", ["qualification", "reminder", "payment"])
-        # Single text input for date and time without timezone
         scheduled_time = st.text_input("Scheduled Time (YYYY-MM-DDTHH:MM:SS)", placeholder="2025-10-08T13:32:00")
-        details_input = st.text_area("Additional Details", "")  # Plain text
+        details_input = st.text_area("Additional Details", "")
         submit_button = st.form_submit_button("Add Lead")
         
         if submit_button:
             with st.spinner("Adding lead..."):
-                # Validate inputs
                 if not name.strip():
                     st.error("Name cannot be empty.")
                 elif not validate_phone(phone):
                     st.error("Invalid phone number. Use format: +919876543210")
                 elif scheduled_time and not validate_scheduled_time(scheduled_time):
-                    st.error("Invalid scheduled time. Use format: YYYY-MM-DDTHH:MM:SS (e.g., 2025-10-08T13:32:00)")
+                    st.error("Invalid scheduled time. Use format: YYYY-MM-DDTHH:MM:SS")
                 else:
-                    # Send scheduled_time as is (no timezone); backend will handle IST
                     final_scheduled_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', scheduled_time) if scheduled_time else None
-                    # Wrap plain text details in a dictionary
                     details = {"text": details_input.strip()} if details_input.strip() else {}
                     status = "Pending" if scheduled_time else "Call Pending"
                     lead_id = add_lead_to_backend(name, phone, prompt_key, call_type, final_scheduled_time, status, details)
                     if lead_id:
                         st.success(f"Lead added successfully! ID: {lead_id}")
-                        st.session_state.leads_updated = time.time()  # Trigger lead refresh
+                        st.session_state.leads_updated = time.time()
                     else:
                         st.error("Failed to add lead. Check backend logs.")
 
-    # Display Leads in Table
+    # Display Leads
     st.subheader("Existing Leads")
     leads = get_leads()
     if leads:
-        # Prepare data for table
         table_data = []
         for lead in leads:
             table_data.append({
@@ -648,10 +667,9 @@ elif page == "Leads Management":
                 "Scheduled Time": lead.get("scheduled_time", "N/A"),
                 "Status": lead["status"],
                 "Details": json.dumps(lead.get("details", {}), indent=2),
-                "Delete": ""  # Placeholder for delete button
+                "Delete": ""
             })
         
-        # Define column configuration for st.data_editor
         column_config = {
             "ID": st.column_config.TextColumn("ID", disabled=True),
             "Name": st.column_config.TextColumn("Name", disabled=True),
@@ -668,12 +686,11 @@ elif page == "Leads Management":
             "Delete": st.column_config.TextColumn("Delete", disabled=True)
         }
         
-        # Display editable table
         edited_data = st.data_editor(
             table_data,
             column_config=column_config,
             hide_index=True,
-            key="leads_table",
+            key=f"leads_table_{st.session_state.leads_updated}",  # Unique key to force refresh
             use_container_width=True
         )
         
@@ -692,7 +709,7 @@ elif page == "Leads Management":
         # Handle delete actions
         for row in edited_data:
             lead_id = row["ID"]
-            if st.button("Delete", key=f"delete_{lead_id}"):
+            if st.button("Delete", key=f"delete_{lead_id}_{st.session_state.leads_updated}"):
                 with st.spinner(f"Deleting lead {row['Name']}..."):
                     if delete_lead_from_backend(lead_id):
                         st.success(f"Lead {row['Name']} deleted successfully!")
@@ -701,6 +718,8 @@ elif page == "Leads Management":
                         st.error(f"Failed to delete lead {row['Name']}.")
     else:
         st.info("No leads found.")
+
+
 
 elif page == "Conversations":
     st.header("Conversations")
@@ -712,12 +731,13 @@ elif page == "Conversations":
                 st.write(f"Summary: {conv['summary']}")
                 st.write(f"Sentiment: {conv['sentiment']}")
                 if conv['audio_url']:
-                    st.audio(conv['audio_url'])
+                    st.audio(conv['audio_url'], format="audio/mp3")
                 else:
                     st.write("No audio available.")
     else:
         st.info("No conversations found.")
 
+# frontend.py
 elif page == "Settings":
     st.header("Settings")
     st.subheader("Voice Configuration")
@@ -731,9 +751,9 @@ elif page == "Settings":
         with st.spinner("Updating voice..."):
             if update_voice_in_backend(voice_name):
                 st.session_state.selected_voice = selected_voice_option
-                st.success(f"Voice updated to {voice_name}!")
+                st.success(f"Voice updated to {voice_name}! Please allow a moment for the change to take effect.")
             else:
-                st.error("Failed to update voice.")
+                st.error("Failed to update voice. Check backend logs.")
 
 # Auto-refresh leads every 30 seconds
 if "last_lead_refresh" not in st.session_state:

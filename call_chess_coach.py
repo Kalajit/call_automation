@@ -23603,7 +23603,7 @@ import asyncio
 import httpx
 import typing
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 from fastapi import FastAPI, Request, Response, WebSocket
 from fastapi.logger import logger as fastapi_logger
 from contextlib import asynccontextmanager
@@ -23633,7 +23633,7 @@ import json  # ADDED for JSON capture with LLM extraction
 import re    # ADDED: general regex utilities
 from pathlib import Path  # ADDED: filesystem-safe paths
 from fastapi import HTTPException  # ADDED n8n
-from pydantic import BaseModel  # ADDED n8n
+from pydantic import BaseModel, validator  # ADDED n8n
 
 # NEW: For sentiment analysis and summaries (using Groq LLM)
 from langchain.prompts import PromptTemplate
@@ -24988,9 +24988,9 @@ async def outbound_scheduler():
                         parsed_time = datetime.fromisoformat(fixed_time)
                         if parsed_time <= datetime.now(parsed_time.tzinfo):
                             should_call = True
-                            logger.info(f"Lead {lead_id} due now: {lead['scheduled_time']}")
+                            logger.info(f"Lead {lead_id} due now: {lead['scheduled_time']} (normalized: {fixed_time})")
                     except ValueError as e:
-                        logger.warning(f"Invalid time for {lead_id}: {lead['scheduled_time']} ({e}). Skipping.")
+                        logger.warning(f"Invalid time for {lead_id}: {lead['scheduled_time']} ({str(e)}). Skipping.")
                         continue
                 if not should_call:
                     continue
@@ -25042,7 +25042,7 @@ async def outbound_scheduler():
 
 
 
-            
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -25581,32 +25581,58 @@ class AddLeadRequest(BaseModel):
     name: str
     phone: str
     prompt_config_key: str
-    call_type: str = "qualification"
+    call_type: str
     scheduled_time: Optional[str] = None
-    status: str = "Pending"
-    details: dict = {}
+    status: str
+    details: Dict
+
+    @validator("scheduled_time")
+    def validate_scheduled_time(cls, value):
+        if not value:
+            return value
+        # Allow YYYY-MM-DDTHH:MM:SS with optional timezone
+        pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})?$'
+        if not re.match(pattern, value):
+            raise ValueError(f"Invalid scheduled_time format: {value}")
+        try:
+            # Normalize to IST
+            fixed_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', value) + '+05:30'
+            datetime.fromisoformat(fixed_time)
+            return value  # Return original value; normalization happens in endpoint
+        except ValueError:
+            raise ValueError(f"Cannot parse scheduled_time: {value}")
 
 @app.post("/add_lead")
 async def add_lead(req: AddLeadRequest):
     try:
+        logger.info(f"Received add_lead request: {req.dict()}")
         # Validate inputs
         if not req.name.strip():
+            logger.error("Validation failed: Name cannot be empty")
             raise HTTPException(400, "Name cannot be empty")
         phone = normalize_e164(req.phone)
         if not phone or len(phone) < 10:
+            logger.error(f"Validation failed: Invalid phone number format: {req.phone}")
             raise HTTPException(400, "Invalid phone number format")
         if req.prompt_config_key not in PROMPT_CONFIGS:
+            logger.error(f"Validation failed: Invalid prompt_config_key: {req.prompt_config_key}")
             raise HTTPException(400, f"Invalid prompt_config_key: {req.prompt_config_key}")
         if req.call_type not in ["qualification", "reminder", "payment"]:
+            logger.error(f"Validation failed: Invalid call_type: {req.call_type}")
             raise HTTPException(400, f"Invalid call_type: {req.call_type}")
+        
+        final_scheduled_time = None
         if req.scheduled_time:
             try:
                 # Normalize scheduled_time: strip timezone and append +05:30
                 fixed_time = req.scheduled_time.replace(" ", "T").replace("-", "T")
                 fixed_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', fixed_time)  # Strip any timezone
                 fixed_time += '+05:30'  # Append IST timezone
+                logger.info(f"Normalized scheduled_time: {fixed_time}")
                 datetime.fromisoformat(fixed_time)
-            except ValueError:
+                final_scheduled_time = fixed_time
+            except ValueError as e:
+                logger.error(f"Validation failed: Invalid scheduled_time format: {req.scheduled_time} ({str(e)})")
                 raise HTTPException(400, f"Invalid scheduled_time format: {req.scheduled_time}")
         
         LEADS_FILE = "leads.json"
@@ -25614,17 +25640,18 @@ async def add_lead(req: AddLeadRequest):
         
         # Set Call Pending if no scheduled_time or time is now/past
         status = req.status
-        if req.scheduled_time:
+        if final_scheduled_time:
             try:
-                fixed_time = req.scheduled_time.replace(" ", "T").replace("-", "T")
-                fixed_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', fixed_time) + '+05:30'
-                sched_time = datetime.fromisoformat(fixed_time)
+                sched_time = datetime.fromisoformat(final_scheduled_time)
                 if sched_time <= datetime.now(sched_time.tzinfo):
                     status = "Call Pending"
-            except ValueError:
-                status = "Call Pending"  # Fallback if time is invalid
+                    logger.info(f"Scheduled time {final_scheduled_time} is now/past; setting status to Call Pending")
+            except ValueError as e:
+                logger.error(f"Failed to parse normalized time {final_scheduled_time}: {str(e)}")
+                status = "Call Pending"  # Fallback
         else:
             status = "Call Pending"  # Immediate call if no scheduled_time
+            logger.info("No scheduled_time provided; setting status to Call Pending")
         
         new_lead = {
             "id": str(uuid.uuid4())[:8],
@@ -25632,21 +25659,22 @@ async def add_lead(req: AddLeadRequest):
             "phone": phone,
             "prompt_config_key": req.prompt_config_key,
             "call_type": req.call_type,
-            "scheduled_time": fixed_time if req.scheduled_time else None,
+            "scheduled_time": final_scheduled_time,
             "status": status,
             "details": req.details,
             "updated_at": datetime.now().isoformat()
         }
         leads.append(new_lead)
         save_leads_to_file(leads, LEADS_FILE)
-        logger.info(f"Added lead {new_lead['id']}: {req.name} (status: {new_lead['status']})")
+        logger.info(f"Added lead {new_lead['id']}: {req.name} (status: {new_lead['status']}, scheduled_time: {final_scheduled_time})")
         return {"success": True, "lead_id": new_lead['id']}
     except HTTPException as e:
         logger.error(f"Add lead failed: {e}")
         raise
     except Exception as e:
-        logger.error(f"Add lead failed: {e}")
+        logger.error(f"Add lead failed: {str(e)}")
         raise HTTPException(500, f"Failed to add lead: {str(e)}")
+
 
 
 

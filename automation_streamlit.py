@@ -1,4 +1,3 @@
-
 import streamlit as st
 import requests
 import json
@@ -115,15 +114,13 @@ def check_pending_leads(leads: list) -> tuple[list, list]:
         elif lead.get("scheduled_time") and lead.get("status") == "Pending":
             try:
                 # Normalize to IST: strip any timezone and append +05:30
-                sched_time_str = lead["scheduled_time"]
-                # Strip existing timezone if present
-                sched_time_str = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', sched_time_str)
+                sched_time_str = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', lead["scheduled_time"])
                 sched_time_str += '+05:30'
                 sched_time = datetime.fromisoformat(sched_time_str)
                 if sched_time <= now:
                     due.append(lead)
-            except ValueError:
-                st.warning(f"Invalid time format for {lead['name']}: {lead['scheduled_time']}")
+            except ValueError as e:
+                st.warning(f"Invalid time format for {lead['name']}: {lead['scheduled_time']} ({str(e)})")
     return pending, due
 
 def get_metrics() -> dict:
@@ -187,12 +184,12 @@ def validate_scheduled_time(scheduled_time: str) -> bool:
     """Validate scheduled time format (YYYY-MM-DDTHH:MM:SS)."""
     if not scheduled_time:
         return True
-    # Allow only YYYY-MM-DDTHH:MM:SS, ignore any timezone
+    # Strictly validate YYYY-MM-DDTHH:MM:SS
     pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$'
     if not re.match(pattern, scheduled_time):
         return False
     try:
-        # Validate parsing with IST timezone
+        # Test parsing with IST timezone
         datetime.fromisoformat(scheduled_time + '+05:30')
         return True
     except ValueError:
@@ -250,7 +247,7 @@ elif page == "Leads Management":
         prompt_key = st.selectbox("Prompt Type", PROMPT_KEYS)
         call_type = st.selectbox("Call Type", ["qualification", "reminder", "payment"])
         # Single text input for date and time without timezone
-        scheduled_time = st.text_input("Scheduled Time (YYYY-MM-DDTHH:MM:SS)", placeholder="2025-10-08T13:18:00")
+        scheduled_time = st.text_input("Scheduled Time (YYYY-MM-DDTHH:MM:SS)", placeholder="2025-10-08T13:32:00")
         details_input = st.text_area("Additional Details", "")  # Plain text
         submit_button = st.form_submit_button("Add Lead")
         
@@ -262,12 +259,10 @@ elif page == "Leads Management":
                 elif not validate_phone(phone):
                     st.error("Invalid phone number. Use format: +919876543210")
                 elif scheduled_time and not validate_scheduled_time(scheduled_time):
-                    st.error("Invalid scheduled time. Use format: YYYY-MM-DDTHH:MM:SS (e.g., 2025-10-08T13:18:00)")
+                    st.error("Invalid scheduled time. Use format: YYYY-MM-DDTHH:MM:SS (e.g., 2025-10-08T13:32:00)")
                 else:
-                    # Normalize scheduled_time: strip any timezone and append +05:30
-                    final_scheduled_time = scheduled_time
-                    if scheduled_time:
-                        final_scheduled_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', scheduled_time) + '+05:30'
+                    # Send scheduled_time as is (no timezone); backend will handle IST
+                    final_scheduled_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', scheduled_time) if scheduled_time else None
                     # Wrap plain text details in a dictionary
                     details = {"text": details_input.strip()} if details_input.strip() else {}
                     status = "Pending" if scheduled_time else "Call Pending"

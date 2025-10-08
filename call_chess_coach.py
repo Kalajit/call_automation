@@ -24982,9 +24982,9 @@ async def outbound_scheduler():
                 should_call = lead.get("status") == "Call Pending"
                 if not should_call and lead.get("scheduled_time"):
                     try:
+                        # Normalize to IST: strip timezone and append +05:30
                         fixed_time = lead["scheduled_time"].replace(" ", "T").replace("-", "T")
-                        if not (fixed_time.endswith('Z') or '+' in fixed_time or '-' in fixed_time):
-                            fixed_time += '+00:00'  # Assume UTC if no timezone
+                        fixed_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', fixed_time) + '+05:30'
                         parsed_time = datetime.fromisoformat(fixed_time)
                         if parsed_time <= datetime.now(parsed_time.tzinfo):
                             should_call = True
@@ -25040,6 +25040,9 @@ async def outbound_scheduler():
             logger.error(f"❌ Scheduler error: {e}")
             await asyncio.sleep(30)
 
+
+
+            
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -25598,10 +25601,10 @@ async def add_lead(req: AddLeadRequest):
             raise HTTPException(400, f"Invalid call_type: {req.call_type}")
         if req.scheduled_time:
             try:
-                # Normalize scheduled_time: append +00:00 if no timezone
+                # Normalize scheduled_time: strip timezone and append +05:30
                 fixed_time = req.scheduled_time.replace(" ", "T").replace("-", "T")
-                if not (fixed_time.endswith('Z') or '+' in fixed_time or '-' in fixed_time):
-                    fixed_time += '+00:00'  # Assume UTC if no timezone
+                fixed_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', fixed_time)  # Strip any timezone
+                fixed_time += '+05:30'  # Append IST timezone
                 datetime.fromisoformat(fixed_time)
             except ValueError:
                 raise HTTPException(400, f"Invalid scheduled_time format: {req.scheduled_time}")
@@ -25614,8 +25617,7 @@ async def add_lead(req: AddLeadRequest):
         if req.scheduled_time:
             try:
                 fixed_time = req.scheduled_time.replace(" ", "T").replace("-", "T")
-                if not (fixed_time.endswith('Z') or '+' in fixed_time or '-' in fixed_time):
-                    fixed_time += '+00:00'  # Assume UTC
+                fixed_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', fixed_time) + '+05:30'
                 sched_time = datetime.fromisoformat(fixed_time)
                 if sched_time <= datetime.now(sched_time.tzinfo):
                     status = "Call Pending"
@@ -25630,7 +25632,7 @@ async def add_lead(req: AddLeadRequest):
             "phone": phone,
             "prompt_config_key": req.prompt_config_key,
             "call_type": req.call_type,
-            "scheduled_time": req.scheduled_time,
+            "scheduled_time": fixed_time if req.scheduled_time else None,
             "status": status,
             "details": req.details,
             "updated_at": datetime.now().isoformat()

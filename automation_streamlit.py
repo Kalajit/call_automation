@@ -114,10 +114,11 @@ def check_pending_leads(leads: list) -> tuple[list, list]:
             pending.append(lead)
         elif lead.get("scheduled_time") and lead.get("status") == "Pending":
             try:
-                # Handle ISO 8601 format with or without timezone
+                # Normalize to IST: strip any timezone and append +05:30
                 sched_time_str = lead["scheduled_time"]
-                if not (sched_time_str.endswith('Z') or '+' in sched_time_str):
-                    sched_time_str += '+05:30'  # Assume IST if no timezone
+                # Strip existing timezone if present
+                sched_time_str = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', sched_time_str)
+                sched_time_str += '+05:30'
                 sched_time = datetime.fromisoformat(sched_time_str)
                 if sched_time <= now:
                     due.append(lead)
@@ -183,18 +184,16 @@ def validate_phone(phone: str) -> bool:
     return bool(re.match(pattern, phone.replace(" ", "")))
 
 def validate_scheduled_time(scheduled_time: str) -> bool:
-    """Validate scheduled time format (YYYY-MM-DDTHH:MM:SS[+HH:MM|Z])."""
+    """Validate scheduled time format (YYYY-MM-DDTHH:MM:SS)."""
     if not scheduled_time:
         return True
-    pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})?$'
+    # Allow only YYYY-MM-DDTHH:MM:SS, ignore any timezone
+    pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$'
     if not re.match(pattern, scheduled_time):
         return False
     try:
-        # Validate parsing, allowing for missing timezone (will append later)
-        if not (scheduled_time.endswith('Z') or '+' in scheduled_time or '-' in scheduled_time):
-            datetime.fromisoformat(scheduled_time + '+05:30')
-        else:
-            datetime.fromisoformat(scheduled_time)
+        # Validate parsing with IST timezone
+        datetime.fromisoformat(scheduled_time + '+05:30')
         return True
     except ValueError:
         return False
@@ -250,8 +249,8 @@ elif page == "Leads Management":
         phone = st.text_input("Phone", placeholder="+919876543210")
         prompt_key = st.selectbox("Prompt Type", PROMPT_KEYS)
         call_type = st.selectbox("Call Type", ["qualification", "reminder", "payment"])
-        # Single text input for date and time with timezone
-        scheduled_time = st.text_input("Scheduled Time (YYYY-MM-DDTHH:MM:SS+05:30)", placeholder="2025-10-08T14:30:00+05:30")
+        # Single text input for date and time without timezone
+        scheduled_time = st.text_input("Scheduled Time (YYYY-MM-DDTHH:MM:SS)", placeholder="2025-10-08T13:18:00")
         details_input = st.text_area("Additional Details", "")  # Plain text
         submit_button = st.form_submit_button("Add Lead")
         
@@ -263,12 +262,12 @@ elif page == "Leads Management":
                 elif not validate_phone(phone):
                     st.error("Invalid phone number. Use format: +919876543210")
                 elif scheduled_time and not validate_scheduled_time(scheduled_time):
-                    st.error("Invalid scheduled time. Use format: YYYY-MM-DDTHH:MM:SS+05:30 (e.g., 2025-10-08T14:30:00+05:30)")
+                    st.error("Invalid scheduled time. Use format: YYYY-MM-DDTHH:MM:SS (e.g., 2025-10-08T13:18:00)")
                 else:
-                    # Append IST timezone if missing
+                    # Normalize scheduled_time: strip any timezone and append +05:30
                     final_scheduled_time = scheduled_time
-                    if scheduled_time and not (scheduled_time.endswith('Z') or '+' in scheduled_time or '-' in scheduled_time):
-                        final_scheduled_time = scheduled_time + '+05:30'
+                    if scheduled_time:
+                        final_scheduled_time = re.sub(r'(Z|[+-]\d{2}:\d{2})$', '', scheduled_time) + '+05:30'
                     # Wrap plain text details in a dictionary
                     details = {"text": details_input.strip()} if details_input.strip() else {}
                     status = "Pending" if scheduled_time else "Call Pending"

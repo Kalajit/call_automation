@@ -24980,17 +24980,20 @@ async def outbound_scheduler():
             for lead in leads[:]:  # Copy to avoid mod during iter
                 lead_id = lead.get("id")
                 should_call = lead.get("status") == "Call Pending"
-                if not should_call and lead.get("scheduled_time"):
-                    try:
-                        # Append +05:30 for IST comparison
-                        scheduled_time = lead["scheduled_time"] + '+05:30'
-                        parsed_time = datetime.fromisoformat(scheduled_time)
-                        if parsed_time <= datetime.now(parsed_time.tzinfo):
-                            should_call = True
-                            logger.info(f"Lead {lead_id} due now: {lead['scheduled_time']} (normalized: {scheduled_time})")
-                    except ValueError as e:
-                        logger.warning(f"Invalid time for {lead_id}: {lead['scheduled_time']} ({str(e)}). Skipping.")
-                        continue
+                if not should_call:
+                    sched_time = lead.get("scheduled_time")
+                    if sched_time:
+                        try:
+                            # FIXED: Robust parsing (space or - to T)
+                            fixed_time = sched_time.replace(" ", "T").replace("-", "T")
+                            parsed_time = datetime.fromisoformat(fixed_time)
+                            if parsed_time <= datetime.now():
+                                should_call = True
+                                logger.info(f"Lead {lead_id} due now: {sched_time}")
+                        except ValueError as e:
+                            logger.warning(f"Invalid time for {lead_id}: {sched_time} ({e}). Skipping.")
+                            continue
+
                 if not should_call:
                     continue
 
@@ -25032,9 +25035,9 @@ async def outbound_scheduler():
                         lead["status"] = "Failed"
                         METRICS["errors"]["general"] += 1
 
-                save_leads_to_file(leads, LEADS_FILE)
+                save_leads_to_file(leads, LEADS_FILE)  # Save after each lead update
             
-            await asyncio.sleep(30)
+            await asyncio.sleep(30)  # FIXED: 30s poll
         except Exception as e:
             logger.error(f"❌ Scheduler error: {e}")
             await asyncio.sleep(30)
@@ -25598,66 +25601,51 @@ class AddLeadRequest(BaseModel):
 @app.post("/add_lead")
 async def add_lead(req: AddLeadRequest):
     try:
-        logger.info(f"Received add_lead request: {req.dict()}")
-        # Validate inputs
-        if not req.name.strip():
-            logger.error("Validation failed: Name cannot be empty")
-            raise HTTPException(400, "Name cannot be empty")
-        phone = normalize_e164(req.phone)
-        if not phone or len(phone) < 10:
-            logger.error(f"Validation failed: Invalid phone number format: {req.phone}")
-            raise HTTPException(400, "Invalid phone number format")
-        if req.prompt_config_key not in PROMPT_CONFIGS:
-            logger.error(f"Validation failed: Invalid prompt_config_key: {req.prompt_config_key}")
-            raise HTTPException(400, f"Invalid prompt_config_key: {req.prompt_config_key}")
-        if req.call_type not in ["qualification", "reminder", "payment"]:
-            logger.error(f"Validation failed: Invalid call_type: {req.call_type}")
-            raise HTTPException(400, f"Invalid call_type: {req.call_type}")
-        
-        final_scheduled_time = req.scheduled_time  # Store exactly as provided
-        logger.info(f"Stored scheduled_time: {final_scheduled_time}")
-        
         LEADS_FILE = "leads.json"
         leads = load_leads_from_file(LEADS_FILE)
-        
-        # Set Call Pending if no scheduled_time or time is now/past
-        status = req.status
-        if final_scheduled_time:
-            try:
-                # Append +05:30 only for comparison
-                sched_time = datetime.fromisoformat(final_scheduled_time + '+05:30')
-                if sched_time <= datetime.now(sched_time.tzinfo):
-                    status = "Call Pending"
-                    logger.info(f"Scheduled time {final_scheduled_time} is now/past; setting status to Call Pending")
-            except ValueError as e:
-                logger.error(f"Failed to parse time {final_scheduled_time}: {str(e)}")
-                status = "Call Pending"  # Fallback
-        else:
-            status = "Call Pending"  # Immediate call if no scheduled_time
-            logger.info("No scheduled_time provided; setting status to Call Pending")
         
         new_lead = {
             "id": str(uuid.uuid4())[:8],
             "name": req.name,
-            "phone": phone,
+            "phone": req.phone,
             "prompt_config_key": req.prompt_config_key,
             "call_type": req.call_type,
-            "scheduled_time": final_scheduled_time,  # Store unchanged
-            "status": status,
+            "scheduled_time": req.scheduled_time,
+            "status": "Call Pending" if req.status == "Pending" and req.scheduled_time else req.status,  # Auto immediate
             "details": req.details,
             "updated_at": datetime.now().isoformat()
         }
         leads.append(new_lead)
         save_leads_to_file(leads, LEADS_FILE)
-        logger.info(f"Added lead {new_lead['id']}: {req.name} (status: {new_lead['status']}, scheduled_time: {final_scheduled_time})")
+        logger.info(f"Added lead {new_lead['id']}: {req.name} (status: {new_lead['status']})")
         return {"success": True, "lead_id": new_lead['id']}
-    except HTTPException as e:
-        logger.error(f"Add lead failed: {e}")
-        raise
     except Exception as e:
-        logger.error(f"Add lead failed: {str(e)}")
+        logger.error(f"Add lead failed: {e}")
         raise HTTPException(500, f"Failed to add lead: {str(e)}")
 
+
+
+# NEW: Endpoint to update lead status
+class UpdateLeadRequest(BaseModel):
+    lead_id: str
+    status: str
+
+@app.post("/update_lead")
+async def update_lead(req: UpdateLeadRequest):
+    try:
+        LEADS_FILE = "leads.json"
+        leads = load_leads_from_file(LEADS_FILE)
+        for lead in leads:
+            if lead["id"] == req.lead_id:
+                lead["status"] = req.status
+                lead["updated_at"] = datetime.now().isoformat()
+                logger.info(f"Updated lead {req.lead_id} status to {req.status}")
+                break
+        save_leads_to_file(leads, LEADS_FILE)
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"Update lead failed: {e}")
+        raise HTTPException(500, f"Failed to update lead: {str(e)}")
 
 
 

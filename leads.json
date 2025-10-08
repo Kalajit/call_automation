@@ -6,8 +6,8 @@
     "prompt_config_key": "medical_sales",
     "call_type": "qualification",
     "scheduled_time": "2025-10-07-T20:21:00",
-    "status": "Call Pending",
+    "status": "Failed",
     "details": {},
-    "updated_at": "2025-10-07T20:19:51.792555"
+    "updated_at": "2025-10-08T16:34:03.878538"
   }
 ]

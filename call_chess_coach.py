@@ -24990,7 +24990,7 @@ async def outbound_scheduler():
     logger.info("Starting outbound scheduler (polling every 30s)")
     while True:
         try:
-            leads = load_leads_from_file(LEADS_FILE)
+            leads = load_leads_from_file(LEADS_FILE)  # Now synchronous, returns list
             logger.info(f"Scheduler: Loaded {len(leads)} leads")
             for lead in leads[:]:
                 lead_id = lead.get("id")
@@ -25751,7 +25751,7 @@ class AddLeadRequest(BaseModel):
 async def add_lead(req: AddLeadRequest):
     try:
         LEADS_FILE = "leads.json"
-        leads = load_leads_from_file(LEADS_FILE)
+        leads = load_leads_from_file(LEADS_FILE)  # Now synchronous, returns list directly
         
         new_lead = {
             "id": str(uuid.uuid4())[:8],
@@ -25760,12 +25760,12 @@ async def add_lead(req: AddLeadRequest):
             "prompt_config_key": req.prompt_config_key,
             "call_type": req.call_type,
             "scheduled_time": req.scheduled_time,
-            "status": "Call Pending" if req.status == "Pending" and req.scheduled_time else req.status,  # Auto immediate
+            "status": "Call Pending" if req.status == "Pending" and req.scheduled_time else req.status,
             "details": req.details,
             "updated_at": datetime.now().isoformat()
         }
-        leads.append(new_lead)
-        save_leads_to_file(leads, LEADS_FILE)
+        leads.append(new_lead)  # Works because leads is a list
+        save_leads_to_file(leads, LEADS_FILE)  # Synchronous save
         logger.info(f"Added lead {new_lead['id']}: {req.name} (status: {new_lead['status']})")
         return {"success": True, "lead_id": new_lead['id']}
     except Exception as e:
@@ -25877,15 +25877,15 @@ async def check_active_call(lead_id: str):
         raise HTTPException(status_code=500, detail=f"Error checking active call: {str(e)}")
 
 
-async def load_leads_from_file(file_path: str):
+def load_leads_from_file(file_path: str):
     if os.path.exists(file_path):
-        async with aiofiles.open(file_path, "r") as f:
-            return json.loads(await f.read())
+        with open(file_path, "r") as f:
+            return json.load(f)
     return []
 
-async def save_leads_to_file(leads: list, file_path: str):
-    async with aiofiles.open(file_path, "w") as f:
-        await f.write(json.dumps(leads, indent=2))
+def save_leads_to_file(leads: list, file_path: str):
+    with open(file_path, "w") as f:
+        json.dump(leads, f, indent=2)
 
 # Main entrypoint (updated to include scheduler)
 if __name__ == "__main__":

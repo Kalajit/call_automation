@@ -25589,16 +25589,11 @@ class AddLeadRequest(BaseModel):
     def validate_scheduled_time(cls, value):
         if not value:
             return value
-        # Accept exactly YYYY-MM-DDTHH:MM:SS
+        # Accept exactly YYYY-MM-DDTHH:MM:SS, no timezone
         pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$'
         if not re.match(pattern, value):
             raise ValueError(f"Invalid scheduled_time format: {value}")
-        try:
-            # Test parsing with +05:30 to ensure valid date
-            datetime.fromisoformat(value + '+05:30')
-            return value  # Return original value unchanged
-        except ValueError:
-            raise ValueError(f"Cannot parse scheduled_time: {value}")
+        return value  # Store as-is, no parsing
 
 @app.post("/add_lead")
 async def add_lead(req: AddLeadRequest):
@@ -25619,9 +25614,8 @@ async def add_lead(req: AddLeadRequest):
             logger.error(f"Validation failed: Invalid call_type: {req.call_type}")
             raise HTTPException(400, f"Invalid call_type: {req.call_type}")
         
-        final_scheduled_time = req.scheduled_time  # Store as-is
-        if final_scheduled_time:
-            logger.info(f"Stored scheduled_time as-is: {final_scheduled_time}")
+        final_scheduled_time = req.scheduled_time  # Store exactly as provided
+        logger.info(f"Stored scheduled_time: {final_scheduled_time}")
         
         LEADS_FILE = "leads.json"
         leads = load_leads_from_file(LEADS_FILE)

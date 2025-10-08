@@ -918,8 +918,7 @@ def get_metrics() -> dict:
         st.error(f"Failed to fetch metrics: {str(e)}")
         return {}
 
-def list_conversations() -> list:
-    """Fetch conversation summaries from the backend."""
+def list_conversations():
     try:
         response = requests.get(f"{BACKEND_URL}/conversations", timeout=10)
         if response.status_code == 200:
@@ -928,7 +927,7 @@ def list_conversations() -> list:
             st.error(f"Failed to fetch conversations: {response.text}")
             return []
     except Exception as e:
-        st.error(f"Failed to fetch conversations: {str(e)}")
+        st.error(f"Error fetching conversations: {str(e)}")
         return []
 
 # frontend.py
@@ -1174,7 +1173,7 @@ elif page == "Conversations":
             with st.expander(f"{conv['name']} ({conv['phone']}) - {conv['type']}"):
                 st.write(f"**Call SID**: {conv['call_sid']}")
                 st.write(f"**Summary**: {conv['summary']}")
-                st.write(f"**Sentiment**: {conv['sentiment']} (Tone Score: {conv.get('sentiment', {}).get('tone_score', 'N/A')})")
+                st.write(f"**Sentiment**: {conv['sentiment']} (Tone Score: {conv['tone_score']})")
                 st.write(f"**Intent**: {conv['intent']}")
                 st.write(f"**Next Actions**: {', '.join(conv['next_actions']) if conv['next_actions'] else 'None'}")
                 st.write("**Transcript**:")
@@ -1185,7 +1184,7 @@ elif page == "Conversations":
                 else:
                     st.write("No audio available.")
     else:
-        st.info("No conversations found. Check if calls have been completed or backend logs for errors.")
+        st.info("No conversations found. Check backend logs or ensure calls have been completed.")
 
 # frontend.py
 elif page == "Settings":

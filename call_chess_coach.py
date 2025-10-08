@@ -26678,53 +26678,62 @@ class ChessEventsManager(events_manager.EventsManager):
 
                 # Perform sentiment analysis
                 sentiment = await sentiment_chain.ainvoke({"transcript": transcript})
-                # Ensure sentiment is structured as expected
                 sentiment = {
-                    "sentiment": sentiment.get("sentiment", "Neutral") if isinstance(sentiment, dict) else sentiment,
+                    "sentiment": sentiment.get("sentiment", "Neutral") if isinstance(sentiment, dict) else str(sentiment),
                     "tone_score": sentiment.get("tone_score", "N/A") if isinstance(sentiment, dict) else "N/A"
                 }
                 logger.info(f"Sentiment for conversation {conversation_id}: {sentiment}")
 
                 # Perform summary generation
                 summary = await summary_chain.ainvoke({"transcript": transcript})
-                # Ensure summary is structured as expected
                 summary = {
-                    "summary": summary.get("summary", "No summary available") if isinstance(summary, dict) else summary,
+                    "summary": summary.get("summary", "No summary available") if isinstance(summary, dict) else str(summary),
                     "intent": summary.get("intent", "Unknown") if isinstance(summary, dict) else "Unknown",
                     "next_actions": summary.get("next_actions", []) if isinstance(summary, dict) else []
                 }
                 logger.info(f"Summary for conversation {conversation_id}: {summary}")
 
-                # Retrieve conversation from store
+                # Retrieve or initialize conversation
                 async with CONVERSATION_STORE_LOCK:
                     conversation = CONVERSATION_STORE.get(conversation_id, {})
+                    lead = LEAD_CONTEXT_STORE.get(conversation_id, {})
                     if not conversation:
-                        logger.warning(f"No conversation found for {conversation_id}, initializing new entry")
+                        logger.info(f"Initializing new conversation entry for {conversation_id}")
                         conversation = {
                             "conversation_id": conversation_id,
-                            "lead": LEAD_CONTEXT_STORE.get(conversation_id, {}),
+                            "lead": lead,
                             "turns": [],
+                            "transcript": "",
+                            "sentiment": {"sentiment": "Neutral", "tone_score": "N/A"},
+                            "summary": {"summary": "No summary available", "intent": "Unknown", "next_actions": []},
+                            "audio_url": None,
+                            "twilio_audio_url": None,
                             "updated_at": int(time.time() * 1000)
                         }
 
-                    # Update conversation with transcript, sentiment, and summary
+                    # Update conversation with latest data
                     conversation.update({
+                        "conversation_id": conversation_id,
+                        "lead": lead,
                         "transcript": transcript,
                         "sentiment": sentiment,
                         "summary": summary,
-                        "turns": conversation.get("turns", []),
+                        "turns": conversation.get("turns", []) + [
+                            {"speaker": turn.speaker, "text": turn.text, "ts": turn.timestamp or int(time.time() * 1000)}
+                            for turn in transcript_complete_event.transcript.turns
+                        ],
                         "updated_at": int(time.time() * 1000)
                     })
 
                     # Handle recording storage
                     audio_path = None
-                    if hasattr(conversation, 'transcriber'):
-                        transcriber = conversation.transcriber
-                        audio_path = await save_recording(conversation_id, transcriber)
+                    if hasattr(self, 'transcriber') and self.transcriber:
+                        audio_path = await save_recording(conversation_id, self.transcriber)
                     else:
-                        logger.error(f"No transcriber found for {conversation_id}")
+                        logger.error(f"No transcriber available for {conversation_id}")
                         METRICS["errors"]["transcriber_missing"] += 1
                     audio_url = f"{CLOUD_STORAGE_URL}/{os.path.basename(audio_path)}" if audio_path and CLOUD_STORAGE_URL else None
+                    conversation["audio_url"] = audio_url
 
                     # Fetch Twilio recording URL
                     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
@@ -26735,28 +26744,26 @@ class ChessEventsManager(events_manager.EventsManager):
                         )
                         twilio_audio_url = f"https://api.twilio.com{recordings[0].uri.replace('.json', '.mp3')}" if recordings else None
                         logger.info(f"Twilio audio URL for {conversation_id}: {twilio_audio_url}")
+                        conversation["twilio_audio_url"] = twilio_audio_url
                     except Exception as e:
                         logger.error(f"Failed to fetch Twilio recording for {conversation_id}: {e}")
-                        twilio_audio_url = None
+                        conversation["twilio_audio_url"] = None
                         METRICS["errors"]["twilio_recording_fetch_failed"] += 1
-
-                    # Update conversation with audio URLs
-                    conversation.update({
-                        "audio_url": audio_url,
-                        "twilio_audio_url": twilio_audio_url
-                    })
 
                     # Save to CONVERSATION_STORE
                     CONVERSATION_STORE[conversation_id] = conversation
 
-                    # Flush to disk
+                    # Ensure CONVERSATIONS_DIR exists
+                    CONVERSATIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+                    # Write to disk
                     out_path = CONVERSATIONS_DIR / f"{conversation_id}.json"
                     try:
                         async with aiofiles.open(out_path, "w", encoding="utf-8") as f:
                             await f.write(json.dumps(conversation, ensure_ascii=False, indent=2))
                         logger.info(f"Wrote conversation {conversation_id} to {out_path}")
                     except Exception as e:
-                        logger.error(f"Failed to write conversation {conversation_id} to disk: {e}")
+                        logger.error(f"Failed to write conversation {conversation_id} to {out_path}: {e}")
                         METRICS["errors"]["conversation_write_failed"] += 1
 
                 # Update CRM
@@ -26768,13 +26775,12 @@ class ChessEventsManager(events_manager.EventsManager):
                     METRICS["errors"]["crm_update_failed"] += 1
 
                 # Send summary to customer/management
-                lead = LEAD_CONTEXT_STORE.get(conversation_id, {})
                 short_summary = f"Call Summary: {summary['summary'][:100]}... Next steps: {', '.join(summary['next_actions'][:2]) if summary['next_actions'] else 'None'}"
                 try:
-                    if "email" in lead:
+                    if lead.get("email"):
                         send_email(lead["email"], "Call Summary", short_summary)
                         logger.info(f"Sent email summary for {conversation_id}")
-                    if "to_phone" in lead:
+                    if lead.get("to_phone"):
                         send_whatsapp(lead["to_phone"], short_summary)
                         logger.info(f"Sent WhatsApp summary for {conversation_id}")
                 except Exception as e:
@@ -28060,14 +28066,21 @@ async def get_metrics():
 
 @app.get("/conversations")
 async def list_conversations_endpoint():
+    # Verify CONVERSATIONS_DIR exists
+    if not CONVERSATIONS_DIR.exists():
+        logger.error(f"CONVERSATIONS_DIR {CONVERSATIONS_DIR} does not exist")
+        METRICS["errors"]["conversations_dir_missing"] = METRICS.get("errors", {}).get("conversations_dir_missing", 0) + 1
+        return {"conversations": []}
+    
     convs = []
-    for file in os.listdir(CONVERSATIONS_DIR):
-        if file.endswith(".json"):
+    try:
+        for file in os.listdir(CONVERSATIONS_DIR):
+            if not file.endswith(".json"):
+                continue
             try:
                 path = CONVERSATIONS_DIR / file
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    # Ensure all required fields are present, even if empty
                     convs.append({
                         "call_sid": data.get("conversation_id", "Unknown"),
                         "name": data.get("lead", {}).get("name", "Unknown"),
@@ -28077,22 +28090,25 @@ async def list_conversations_endpoint():
                         "sentiment": data.get("sentiment", {}).get("sentiment", "Neutral"),
                         "tone_score": data.get("sentiment", {}).get("tone_score", "N/A"),
                         "audio_url": data.get("twilio_audio_url") or data.get("audio_url", None),
-                        "transcript": "\n".join(
-                            [f"{t['speaker'].capitalize()}: {t['text']}" for t in data.get("turns", [])]
-                        ) or "No transcript available",
+                        "transcript": data.get("transcript", "No transcript available"),
                         "intent": data.get("summary", {}).get("intent", "Unknown"),
                         "next_actions": data.get("summary", {}).get("next_actions", []),
-                        "updated_at": data.get("updated_at", "Unknown")
+                        "updated_at": data.get("updated_at", 0)
                     })
+                logger.debug(f"Loaded conversation from {path}")
             except Exception as e:
                 logger.error(f"Failed to load conversation {file}: {e}")
-                METRICS["errors"]["conversation_load_failed"] = METRICS.get("errors", {}).get("conversation_load_failed", 0) + 1
+                METRICS["errors"]["conversation_load_failed"] += 1
                 continue
-    if not convs:
-        logger.warning("No conversations found in CONVERSATIONS_DIR")
-    else:
-        logger.info(f"Loaded {len(convs)} conversations from {CONVERSATIONS_DIR}")
-    return {"conversations": sorted(convs, key=lambda x: x.get("updated_at", 0), reverse=True)}
+        if not convs:
+            logger.warning(f"No conversations found in {CONVERSATIONS_DIR}")
+        else:
+            logger.info(f"Loaded {len(convs)} conversations from {CONVERSATIONS_DIR}")
+        return {"conversations": sorted(convs, key=lambda x: x["updated_at"], reverse=True)}
+    except Exception as e:
+        logger.error(f"Error accessing CONVERSATIONS_DIR {CONVERSATIONS_DIR}: {e}")
+        METRICS["errors"]["conversations_dir_access"] += 1
+        return {"conversations": []}
 
 
 

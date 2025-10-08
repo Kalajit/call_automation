@@ -1148,21 +1148,44 @@ elif page == "Leads Management":
 
 
 
+# elif page == "Conversations":
+#     st.header("Conversations")
+#     conversations = list_conversations()
+#     if conversations:
+#         for conv in conversations:
+#             with st.expander(f"{conv['name']} ({conv['phone']}) - {conv['type']}"):
+#                 st.write(f"Call SID: {conv['call_sid']}")
+#                 st.write(f"Summary: {conv['summary']}")
+#                 st.write(f"Sentiment: {conv['sentiment']}")
+#                 if conv['audio_url']:
+#                     st.audio(conv['audio_url'], format="audio/mp3")
+#                 else:
+#                     st.write("No audio available.")
+#     else:
+#         st.info("No conversations found.")
+
+
+
 elif page == "Conversations":
     st.header("Conversations")
     conversations = list_conversations()
     if conversations:
         for conv in conversations:
             with st.expander(f"{conv['name']} ({conv['phone']}) - {conv['type']}"):
-                st.write(f"Call SID: {conv['call_sid']}")
-                st.write(f"Summary: {conv['summary']}")
-                st.write(f"Sentiment: {conv['sentiment']}")
+                st.write(f"**Call SID**: {conv['call_sid']}")
+                st.write(f"**Summary**: {conv['summary']}")
+                st.write(f"**Sentiment**: {conv['sentiment']} (Tone Score: {conv.get('sentiment', {}).get('tone_score', 'N/A')})")
+                st.write(f"**Intent**: {conv['intent']}")
+                st.write(f"**Next Actions**: {', '.join(conv['next_actions']) if conv['next_actions'] else 'None'}")
+                st.write("**Transcript**:")
+                st.text(conv['transcript'])
                 if conv['audio_url']:
+                    st.write("**Audio Recording**:")
                     st.audio(conv['audio_url'], format="audio/mp3")
                 else:
                     st.write("No audio available.")
     else:
-        st.info("No conversations found.")
+        st.info("No conversations found. Check if calls have been completed or backend logs for errors.")
 
 # frontend.py
 elif page == "Settings":

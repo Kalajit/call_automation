@@ -27394,27 +27394,46 @@ async def outbound_scheduler():
             for lead in leads[:]:
                 lead_id = lead.get("id")
                 logger.debug(f"Processing lead {lead_id}: {lead.get('name')} ({lead.get('phone')})")
-                should_call = lead.get("status") == "Call Pending"
-                if not should_call and lead.get("scheduled_time"):
-                    sched_time = lead.get("scheduled_time")
-                    try:
-                        # Ensure correct ISO format (YYYY-MM-DDTHH:MM:SS)
-                        if not re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$', sched_time):
-                            logger.warning(f"Invalid scheduled_time format for {lead_id}: {sched_time}")
-                            continue
-                        parsed_time = datetime.fromisoformat(sched_time + '+05:30')
-                        now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-                        if parsed_time <= now:
-                            should_call = True
-                            logger.info(f"Lead {lead_id} due now: {sched_time} (parsed: {parsed_time}, now: {now})")
-                        else:
-                            logger.debug(f"Lead {lead_id} not due yet: {sched_time} (parsed: {parsed_time}, now: {now})")
-                    except ValueError as e:
-                        logger.warning(f"Failed to parse scheduled_time for {lead_id}: {sched_time} ({e})")
-                        continue
-                if not should_call:
-                    logger.debug(f"Skipping lead {lead_id}: status={lead.get('status')} and not due")
+                
+                # Only proceed if status is "Call Pending"
+                if lead.get("status") != "Call Pending":
+                    logger.debug(f"Skipping lead {lead_id}: status={lead.get('status')} (not Call Pending)")
                     continue
+                
+                # Check if scheduled_time is due
+                should_call = False
+                sched_time = lead.get("scheduled_time")
+                if not sched_time:
+                    logger.warning(f"No scheduled_time for lead {lead_id}")
+                    continue
+                try:
+                    # Ensure correct ISO format (YYYY-MM-DDTHH:MM:SS)
+                    if not re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$', sched_time):
+                        logger.warning(f"Invalid scheduled_time format for {lead_id}: {sched_time}")
+                        lead["status"] = "Failed"
+                        lead["updated_at"] = datetime.now().isoformat()
+                        save_leads_to_file(leads, LEADS_FILE)
+                        METRICS["errors"]["invalid_time_format"] += 1
+                        continue
+                    parsed_time = datetime.fromisoformat(sched_time + '+05:30')
+                    now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+                    if parsed_time <= now:
+                        should_call = True
+                        logger.info(f"Lead {lead_id} due now: {sched_time} (parsed: {parsed_time}, now: {now})")
+                    else:
+                        logger.debug(f"Lead {lead_id} not due yet: {sched_time} (parsed: {parsed_time}, now: {now})")
+                except ValueError as e:
+                    logger.warning(f"Failed to parse scheduled_time for {lead_id}: {sched_time} ({e})")
+                    lead["status"] = "Failed"
+                    lead["updated_at"] = datetime.now().isoformat()
+                    save_leads_to_file(leads, LEADS_FILE)
+                    METRICS["errors"]["invalid_time_format"] += 1
+                    continue
+                
+                if not should_call:
+                    logger.debug(f"Skipping lead {lead_id}: scheduled_time not due")
+                    continue
+                
                 call_type = lead.get("call_type", "qualification")
                 prompt_key = lead.get("prompt_config_key", "chess_coach")
                 name = lead.get("name")
@@ -27426,6 +27445,7 @@ async def outbound_scheduler():
                     save_leads_to_file(leads, LEADS_FILE)
                     METRICS["errors"]["invalid_phone"] += 1
                     continue
+                
                 active_sids = [sid for sid in ACTIVE_CALLS if await is_call_active(client, sid)]
                 skip = any(
                     LEAD_CONTEXT_STORE.get(sid, {}).get("to_phone") == phone or 
@@ -27436,13 +27456,14 @@ async def outbound_scheduler():
                     logger.info(f"Skipping lead {lead_id}: Active call detected")
                     METRICS["errors"]["duplicate_call"] += 1
                     continue
+                
                 logger.info(f"🚀 Auto-calling {lead_id}: {name} ({phone}) - {prompt_key}")
                 async with CALL_RATE_LIMITER:
                     try:
                         call_sid = await make_outbound_call(
                             to_phone=phone, name=name, call_type=call_type, lead=lead, prompt_config_key=prompt_key
                         )
-                        async with asyncio.Lock():  # Ensure thread-safe update to ACTIVE_CALLS
+                        async with asyncio.Lock():
                             ACTIVE_CALLS.add(call_sid)
                         lead["status"] = "Called"
                         lead["call_sid"] = call_sid

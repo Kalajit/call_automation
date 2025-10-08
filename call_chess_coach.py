@@ -24984,30 +24984,36 @@ app = FastAPI()
 
 
 async def outbound_scheduler():
-    # UPDATED: Fix calls repeating and status updates
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     LEADS_FILE = "leads.json"
     logger.info("Starting outbound scheduler (polling every 30s)")
     while True:
         try:
-            leads = load_leads_from_file(LEADS_FILE)  # Now synchronous, returns list
+            leads = load_leads_from_file(LEADS_FILE)
             logger.info(f"Scheduler: Loaded {len(leads)} leads")
             for lead in leads[:]:
                 lead_id = lead.get("id")
+                logger.debug(f"Processing lead {lead_id}: {lead.get('name')} ({lead.get('phone')})")
                 should_call = lead.get("status") == "Call Pending"
-                if not should_call:
+                if not should_call and lead.get("scheduled_time"):
                     sched_time = lead.get("scheduled_time")
-                    if sched_time:
-                        try:
-                            fixed_time = sched_time.replace(" ", "T").replace("-", "T")
-                            parsed_time = datetime.fromisoformat(fixed_time + '+05:30')
-                            if parsed_time <= datetime.now(timezone(timedelta(hours=5, minutes=30))):
-                                should_call = True
-                                logger.info(f"Lead {lead_id} due now: {sched_time}")
-                        except ValueError as e:
-                            logger.warning(f"Invalid time for {lead_id}: {sched_time} ({e}). Skipping.")
+                    try:
+                        # Ensure correct ISO format (YYYY-MM-DDTHH:MM:SS)
+                        if not re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$', sched_time):
+                            logger.warning(f"Invalid scheduled_time format for {lead_id}: {sched_time}")
                             continue
+                        parsed_time = datetime.fromisoformat(sched_time + '+05:30')
+                        now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+                        if parsed_time <= now:
+                            should_call = True
+                            logger.info(f"Lead {lead_id} due now: {sched_time} (parsed: {parsed_time}, now: {now})")
+                        else:
+                            logger.debug(f"Lead {lead_id} not due yet: {sched_time} (parsed: {parsed_time}, now: {now})")
+                    except ValueError as e:
+                        logger.warning(f"Failed to parse scheduled_time for {lead_id}: {sched_time} ({e})")
+                        continue
                 if not should_call:
+                    logger.debug(f"Skipping lead {lead_id}: status={lead.get('status')} and not due")
                     continue
                 call_type = lead.get("call_type", "qualification")
                 prompt_key = lead.get("prompt_config_key", "chess_coach")
@@ -25027,7 +25033,7 @@ async def outbound_scheduler():
                     for sid in active_sids
                 )
                 if skip:
-                    logger.info(f"Skipping {lead_id}: Active call")
+                    logger.info(f"Skipping lead {lead_id}: Active call detected")
                     METRICS["errors"]["duplicate_call"] += 1
                     continue
                 logger.info(f"🚀 Auto-calling {lead_id}: {name} ({phone}) - {prompt_key}")
@@ -25036,7 +25042,8 @@ async def outbound_scheduler():
                         call_sid = await make_outbound_call(
                             to_phone=phone, name=name, call_type=call_type, lead=lead, prompt_config_key=prompt_key
                         )
-                        ACTIVE_CALLS.add(call_sid)
+                        async with asyncio.Lock():  # Ensure thread-safe update to ACTIVE_CALLS
+                            ACTIVE_CALLS.add(call_sid)
                         lead["status"] = "Called"
                         lead["call_sid"] = call_sid
                         lead["updated_at"] = datetime.now().isoformat()
@@ -25051,7 +25058,7 @@ async def outbound_scheduler():
             await asyncio.sleep(30)
         except Exception as e:
             logger.error(f"❌ Scheduler error: {e}")
-            await asyncio.sleep(30)
+            await asyncio.sleep(30) 
 
 
 

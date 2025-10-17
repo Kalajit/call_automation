@@ -27428,6 +27428,19 @@ async def outbound_scheduler():
                 lead_id = lead.get("id")
                 logger.debug(f"Processing lead {lead_id}: {lead.get('name')} ({lead.get('phone')})")
                 
+                # Reset Failed leads to Call Pending after 1 hour
+                if lead.get("status") == "Failed" and lead.get("updated_at"):
+                    try:
+                        last_updated = datetime.fromisoformat(lead["updated_at"])
+                        now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+                        if (now - last_updated).total_seconds() >= 3600:  # 1 hour
+                            lead["status"] = "Call Pending"
+                            lead["updated_at"] = now.isoformat()
+                            logger.info(f"Reset lead {lead_id} status to Call Pending for retry")
+                    except ValueError as e:
+                        logger.warning(f"Failed to parse updated_at for {lead_id}: {e}")
+                        continue
+                
                 # Only proceed if status is "Call Pending"
                 if lead.get("status") != "Call Pending":
                     logger.debug(f"Skipping lead {lead_id}: status={lead.get('status')} (not Call Pending)")
@@ -27436,35 +27449,32 @@ async def outbound_scheduler():
                 # Check if scheduled_time is due
                 should_call = False
                 sched_time = lead.get("scheduled_time")
-                if lead.get("status") == "Call Pending":
+                if not sched_time:
                     should_call = True  # Immediate calls don't need time check
-                elif sched_time:
-                    if not sched_time:
-                        logger.warning(f"No scheduled_time for lead {lead_id}")
-                        continue
-                try:
-                    # Ensure correct ISO format (YYYY-MM-DDTHH:MM:SS)
-                    if not re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$', sched_time):
-                        logger.warning(f"Invalid scheduled_time format for {lead_id}: {sched_time}")
+                else:
+                    try:
+                        # Ensure correct ISO format (YYYY-MM-DDTHH:MM:SS)
+                        if not re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$', sched_time):
+                            logger.warning(f"Invalid scheduled_time format for {lead_id}: {sched_time}")
+                            lead["status"] = "Failed"
+                            lead["updated_at"] = datetime.now().isoformat()
+                            save_leads_to_file(leads, LEADS_FILE)
+                            METRICS["errors"]["invalid_time_format"] += 1
+                            continue
+                        parsed_time = datetime.fromisoformat(sched_time + '+05:30')
+                        now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+                        if parsed_time <= now:
+                            should_call = True
+                            logger.info(f"Lead {lead_id} due now: {sched_time} (parsed: {parsed_time}, now: {now})")
+                        else:
+                            logger.debug(f"Lead {lead_id} not due yet: {sched_time} (parsed: {parsed_time}, now: {now})")
+                    except ValueError as e:
+                        logger.warning(f"Failed to parse scheduled_time for {lead_id}: {sched_time} ({e})")
                         lead["status"] = "Failed"
                         lead["updated_at"] = datetime.now().isoformat()
                         save_leads_to_file(leads, LEADS_FILE)
                         METRICS["errors"]["invalid_time_format"] += 1
                         continue
-                    parsed_time = datetime.fromisoformat(sched_time + '+05:30')
-                    now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-                    if parsed_time <= now:
-                        should_call = True
-                        logger.info(f"Lead {lead_id} due now: {sched_time} (parsed: {parsed_time}, now: {now})")
-                    else:
-                        logger.debug(f"Lead {lead_id} not due yet: {sched_time} (parsed: {parsed_time}, now: {now})")
-                except ValueError as e:
-                    logger.warning(f"Failed to parse scheduled_time for {lead_id}: {sched_time} ({e})")
-                    lead["status"] = "Failed"
-                    lead["updated_at"] = datetime.now().isoformat()
-                    save_leads_to_file(leads, LEADS_FILE)
-                    METRICS["errors"]["invalid_time_format"] += 1
-                    continue
                 
                 if not should_call:
                     logger.debug(f"Skipping lead {lead_id}: scheduled_time not due")
@@ -27919,12 +27929,25 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
             METRICS["errors"]["general"] += 1
             raise ValueError("Missing required Twilio environment variables")
 
+        # Validate Twilio credentials
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        try:
+            # Test credentials by fetching account details
+            account = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: client.api.accounts(TWILIO_ACCOUNT_SID).fetch()
+            )
+            logger.debug(f"Twilio account verified: {account.sid}")
+        except Exception as e:
+            logger.error(f"Twilio authentication failed: {str(e)}", exc_info=True)
+            METRICS["errors"]["twilio_auth_failed"] += 1
+            raise HTTPException(status_code=500, detail=f"Twilio authentication failed: {str(e)}")
+
         twilio_base_url = f"https://{BASE_URL}"
         
         if not prompt_config_key or prompt_config_key not in PROMPT_CONFIGS:
             logger.warning(f"Invalid prompt_config_key: {prompt_config_key}. Falling back to 'chess_coach'")
-            prompt_config_key = "chess_coach"  # Fixed log to match fallback
+            prompt_config_key = "chess_coach"
         prompt_config = PROMPT_CONFIGS[prompt_config_key]
         initial_message = prompt_config["initial_message"].replace("{{name}}", name or "there")
         logger.debug(f"Using prompt_config_key: {prompt_config_key}, name: {name}, initial_message: {initial_message}")
@@ -27934,7 +27957,7 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
         elif call_type == "payment":
             initial_message = f"Payment reminder for ₹500 due by {lead.get('due_date', time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400)))}. Settled?"
         
-        # NEW: Load voice configuration to ensure consistency
+        # Load voice configuration
         voice = load_voice_config()
         logger.debug(f"Loaded voice configuration: {voice}")
         
@@ -27975,15 +27998,14 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
                 lambda: sync_make_call(client, call_params)
             )
             call_sid = call.sid
-            async with asyncio.Lock():  # NEW: Lock for ACTIVE_CALLS
-                ACTIVE_CALLS.add(call_sid)  # Track active call
-            METRICS["calls_initiated"][call_type] += 1  # Track successful initiation
+            async with asyncio.Lock():
+                ACTIVE_CALLS.add(call_sid)
+            METRICS["calls_initiated"][call_type] += 1
         except Exception as twilio_error:
             logger.error(f"Twilio API call failed after retries: {str(twilio_error)}", exc_info=True)
             METRICS["errors"]["twilio_call_failed"] += 1
             raise HTTPException(status_code=500, detail=f"Twilio API error: {str(twilio_error)}")
         
-        # Await the save_config coroutine
         await config_manager.save_config(f"agent_{call_sid}", {
             "initial_message": agent_config.initial_message.text,
             "prompt_preamble": agent_config.prompt_preamble,
@@ -27993,8 +28015,8 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
             "lead": lead or {},
             "prompt_config_key": prompt_config_key,
             "name": name,
-            "conversation_id": call_sid,  # Ensure conversation_id is stored
-            "voice": voice  # NEW: Store voice configuration
+            "conversation_id": call_sid,
+            "voice": voice
         })
         logger.info(f"Saved agent config for CallSid: {call_sid}, prompt_config_key: {prompt_config_key}, name: {name}, voice: {voice}")
         
@@ -28023,17 +28045,17 @@ async def make_outbound_call(to_phone: str, name: str, call_type: str, lead: dic
                 "lead": lead,
                 "slots": {},
                 "turns": [{"speaker": "bot", "text": initial_message, "ts": int(time.time() * 1000)}],
-                "twilio_audio_url": None  # NEW: Ensure twilio_audio_url is included
+                "twilio_audio_url": None
             }
-            await _flush_to_disk(call_sid)  # Persist to disk immediately
+            await _flush_to_disk(call_sid)
         logger.debug(f"Updated LEAD_CONTEXT_STORE and CONVERSATION_STORE for CallSid: {call_sid}")
         
         return call_sid
     except Exception as e:
         logger.error(f"make_outbound_call failed: {str(e)}", exc_info=True)
         if 'call_sid' in locals():
-            async with asyncio.Lock():  # NEW: Lock for ACTIVE_CALLS
-                ACTIVE_CALLS.discard(call_sid)  # Clean up on failure
+            async with asyncio.Lock():
+                ACTIVE_CALLS.discard(call_sid)
         METRICS["errors"]["general"] += 1
         raise HTTPException(status_code=500, detail=f"Failed to initiate call: {str(e)}")
 
@@ -28349,12 +28371,42 @@ class UpdateVoiceRequest(BaseModel):
 @app.post("/update_voice")
 async def update_voice(req: UpdateVoiceRequest):
     try:
-        global synthesizer_config
-        synthesizer_config.voice = req.voice
-        telephony_server.inbound_call_configs[0].synthesizer_config = synthesizer_config
-        telephony_server.synthesizer_factory = CustomSynthesizerFactory()
+        global synthesizer_config, telephony_server
+        # Update the global synthesizer_config with the new voice
+        synthesizer_config = StreamElementsSynthesizerConfig.from_telephone_output_device(
+            voice=req.voice
+        )
+        # Reinitialize telephony_server with updated synthesizer_config
+        telephony_server = TelephonyServer(
+            base_url=BASE_URL,
+            config_manager=config_manager,
+            inbound_call_configs=[
+                TwilioInboundCallConfig(
+                    url="/inbound_call",
+                    twilio_config=twilio_config,
+                    agent_config=get_default_agent_config(),
+                    synthesizer_config=synthesizer_config,  # Use updated config
+                    transcriber_config=transcriber_config,
+                    twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
+    <Pause length="15"/>
+    <Redirect method="POST">/inbound_call</Redirect>
+</Response>''',
+                    record=True,
+                    status_callback=f"https://{BASE_URL}/call_status",
+                    status_callback_method="POST",
+                    status_callback_event=["initiated", "ringing", "answered", "completed"],
+                    recording_status_callback=f"https://{BASE_URL}/recording_status",
+                    recording_status_callback_method="POST"
+                )
+            ],
+            agent_factory=CustomAgentFactory(),
+            synthesizer_factory=CustomSynthesizerFactory(),
+            events_manager=ChessEventsManager()
+        )
         save_voice_config(req.voice)
-        logger.info(f"Updated voice to {req.voice}")
+        logger.info(f"Updated voice to <<<<<<<<<<<<<<<<<<<<<<<<{req.voice}>>>>>>>>>>>>>>>>>>")
         return {"success": True, "voice": req.voice}
     except Exception as e:
         logger.error(f"Failed to update voice: {e}", exc_info=True)

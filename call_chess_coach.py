@@ -27431,7 +27431,7 @@ async def outbound_scheduler():
                 # Reset Failed leads to Call Pending after 1 hour
                 if lead.get("status") == "Failed" and lead.get("updated_at"):
                     try:
-                        last_updated = datetime.fromisoformat(lead["updated_at"])
+                        last_updated = datetime.fromisoformat(lead["updated_at"]).replace(tzinfo=timezone(timedelta(hours=5, minutes=30)))  # Make aware with IST
                         now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
                         if (now - last_updated).total_seconds() >= 3600:  # 1 hour
                             lead["status"] = "Call Pending"

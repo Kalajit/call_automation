@@ -26006,6 +26006,10 @@ import uuid
 from asyncio import create_task
 
 
+from filelock import FileLock
+
+
+
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -26676,20 +26680,37 @@ class ChessEventsManager(events_manager.EventsManager):
                 transcript = transcript_complete_event.transcript.to_string()
                 logger.debug(f"Transcript for conversation {conversation_id}: {transcript}")
 
+                def strip_non_json(text):
+                    start = text.find('{')
+                    end = text.rfind('}') + 1
+                    if start != -1 and end != -1:
+                        return text[start:end]
+                    return text
+
                 # Perform sentiment analysis
-                sentiment = await sentiment_chain.ainvoke({"transcript": transcript})
+                sentiment_raw = await sentiment_chain.ainvoke({"transcript": transcript})
+                cleaned_text = strip_non_json(sentiment_raw['text'])
+                try:
+                    sentiment_json = json.loads(cleaned_text)
+                except:
+                    sentiment_json = {}
                 sentiment = {
-                    "sentiment": sentiment.get("sentiment", "Neutral") if isinstance(sentiment, dict) else str(sentiment),
-                    "tone_score": sentiment.get("tone_score", "N/A") if isinstance(sentiment, dict) else "N/A"
+                    "sentiment": sentiment_json.get("sentiment", "Neutral"),
+                    "tone_score": sentiment_json.get("tone_score", "N/A")
                 }
                 logger.info(f"Sentiment for conversation {conversation_id}: {sentiment}")
 
                 # Perform summary generation
-                summary = await summary_chain.ainvoke({"transcript": transcript})
+                summary_raw = await summary_chain.ainvoke({"transcript": transcript})
+                cleaned_text = strip_non_json(summary_raw['text'])
+                try:
+                    summary_json = json.loads(cleaned_text)
+                except:
+                    summary_json = {}
                 summary = {
-                    "summary": summary.get("summary", "No summary available") if isinstance(summary, dict) else str(summary),
-                    "intent": summary.get("intent", "Unknown") if isinstance(summary, dict) else "Unknown",
-                    "next_actions": summary.get("next_actions", []) if isinstance(summary, dict) else []
+                    "summary": summary_json.get("summary", "No summary available"),
+                    "intent": summary_json.get("intent", "Unknown"),
+                    "next_actions": summary_json.get("next_actions", [])
                 }
                 logger.info(f"Summary for conversation {conversation_id}: {summary}")
 
@@ -26726,13 +26747,9 @@ class ChessEventsManager(events_manager.EventsManager):
                     })
 
                     # Handle recording storage
-                    audio_path = None
-                    if hasattr(self, 'transcriber') and self.transcriber:
-                        audio_path = await save_recording(conversation_id, self.transcriber)
-                    else:
-                        logger.error(f"No transcriber available for {conversation_id}")
-                        METRICS["errors"]["transcriber_missing"] += 1
-                    audio_url = f"{CLOUD_STORAGE_URL}/{os.path.basename(audio_path)}" if audio_path and CLOUD_STORAGE_URL else None
+                    # Handle recording storage
+                    audio_path = RECORDINGS_DIR / f"{conversation_id}.wav"
+                    audio_url = f"{CLOUD_STORAGE_URL}/{conversation_id}.wav" if audio_path.exists() else None
                     conversation["audio_url"] = audio_url
 
                     # Fetch Twilio recording URL
@@ -26767,12 +26784,15 @@ class ChessEventsManager(events_manager.EventsManager):
                         METRICS["errors"]["conversation_write_failed"] += 1
 
                 # Update CRM
-                try:
-                    await update_crm(conversation_id, transcript, sentiment, summary, audio_url, twilio_audio_url=twilio_audio_url)
-                    logger.info(f"Updated CRM for conversation {conversation_id}")
-                except Exception as e:
-                    logger.error(f"Failed to update CRM for {conversation_id}: {e}")
-                    METRICS["errors"]["crm_update_failed"] += 1
+                if CRM_API_URL and CRM_API_KEY:
+                    try:
+                        await update_crm(conversation_id, transcript, sentiment, summary, audio_url, twilio_audio_url=twilio_audio_url)
+                        logger.info(f"Updated CRM for conversation {conversation_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to update CRM for {conversation_id}: {e}")
+                        METRICS["errors"]["crm_update_failed"] += 1
+                else:
+                    logger.warning("CRM not configured, skipping update")
 
                 # Send summary to customer/management
                 short_summary = f"Call Summary: {summary['summary'][:100]}... Next steps: {', '.join(summary['next_actions'][:2]) if summary['next_actions'] else 'None'}"
@@ -27307,6 +27327,13 @@ class CustomDeepgramTranscriber(DeepgramTranscriber):
             logger.error(f"Failed to connect to Deepgram WebSocket: {e}")
             raise
 
+
+    async def terminate(self):
+        await super().terminate()
+        if self.conversation_id and self.audio_buffer.tell() > 0:
+            await self._save_audio()
+        self.is_connected = False
+
 # Custom Agent Factory
 class CustomAgentFactory:
     def create_agent(self, agent_config: AgentConfig, logger: typing.Optional[logging.Logger] = None, conversation_id: typing.Optional[str] = None) -> BaseAgent:
@@ -27409,9 +27436,12 @@ async def outbound_scheduler():
                 # Check if scheduled_time is due
                 should_call = False
                 sched_time = lead.get("scheduled_time")
-                if not sched_time:
-                    logger.warning(f"No scheduled_time for lead {lead_id}")
-                    continue
+                if lead.get("status") == "Call Pending":
+                    should_call = True  # Immediate calls don't need time check
+                elif sched_time:
+                    if not sched_time:
+                        logger.warning(f"No scheduled_time for lead {lead_id}")
+                        continue
                 try:
                     # Ensure correct ISO format (YYYY-MM-DDTHH:MM:SS)
                     if not re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$', sched_time):
@@ -28261,44 +28291,73 @@ async def update_lead(req: UpdateLeadRequest):
 class UpdateVoiceRequest(BaseModel):
     voice: str
 
+# @app.post("/update_voice")
+# async def update_voice(req: UpdateVoiceRequest):
+#     try:
+#         global synthesizer_config, telephony_server
+#         synthesizer_config = StreamElementsSynthesizerConfig.from_telephone_output_device(voice=req.voice)
+#         save_voice_config(req.voice)
+#         telephony_server = TelephonyServer(
+#             base_url=BASE_URL,
+#             config_manager=config_manager,
+#             inbound_call_configs=[
+#                 TwilioInboundCallConfig(
+#                     url="/inbound_call",
+#                     twilio_config=twilio_config,
+#                     agent_config=get_default_agent_config(),
+#                     synthesizer_config=synthesizer_config,
+#                     transcriber_config=transcriber_config,
+#                     twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
+# <Response>
+#     <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
+#     <Pause length="15"/>
+#     <Redirect method="POST">/inbound_call</Redirect>
+# </Response>''',
+#                     record=True,
+#                     status_callback=f"https://{BASE_URL}/call_status",
+#                     status_callback_method="POST",
+#                     status_callback_event=["initiated", "ringing", "answered", "completed"],
+#                     recording_status_callback=f"https://{BASE_URL}/recording_status",
+#                     recording_status_callback_method="POST"
+#                 )
+#             ],
+#             agent_factory=CustomAgentFactory(),
+#             synthesizer_factory=CustomSynthesizerFactory(),
+#             events_manager=ChessEventsManager()
+#         )
+#         logger.info(f"Updated synthesizer voice to: {req.voice} and reinitialized TelephonyServer")
+#         return {"success": True, "voice": req.voice}
+#     except Exception as e:
+#         logger.error(f"Failed to update voice: {e}")
+#         raise HTTPException(500, f"Failed to update voice: {str(e)}")
+
+
+
+
+# @app.post("/update_voice")
+# async def update_voice(req: UpdateVoiceRequest):
+#     try:
+#         telephony_server.inbound_call_configs[0].synthesizer_config.voice = req.voice
+#         save_voice_config(req.voice)
+#         logger.info(f"Updated voice to {req.voice}")
+#         return {"success": True, "voice": req.voice}
+#     except Exception as e:
+#         logger.error(f"Failed to update voice: {e}", exc_info=True)
+#         raise HTTPException(500, f"Failed to update voice: {str(e)}")
+
+
 @app.post("/update_voice")
 async def update_voice(req: UpdateVoiceRequest):
     try:
-        global synthesizer_config, telephony_server
-        synthesizer_config = StreamElementsSynthesizerConfig.from_telephone_output_device(voice=req.voice)
+        global synthesizer_config
+        synthesizer_config.voice = req.voice
+        telephony_server.inbound_call_configs[0].synthesizer_config = synthesizer_config
+        telephony_server.synthesizer_factory = CustomSynthesizerFactory()
         save_voice_config(req.voice)
-        telephony_server = TelephonyServer(
-            base_url=BASE_URL,
-            config_manager=config_manager,
-            inbound_call_configs=[
-                TwilioInboundCallConfig(
-                    url="/inbound_call",
-                    twilio_config=twilio_config,
-                    agent_config=get_default_agent_config(),
-                    synthesizer_config=synthesizer_config,
-                    transcriber_config=transcriber_config,
-                    twiml_fallback_response='''<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say>I didn't hear a response. Are you still there? Please say something to continue.</Say>
-    <Pause length="15"/>
-    <Redirect method="POST">/inbound_call</Redirect>
-</Response>''',
-                    record=True,
-                    status_callback=f"https://{BASE_URL}/call_status",
-                    status_callback_method="POST",
-                    status_callback_event=["initiated", "ringing", "answered", "completed"],
-                    recording_status_callback=f"https://{BASE_URL}/recording_status",
-                    recording_status_callback_method="POST"
-                )
-            ],
-            agent_factory=CustomAgentFactory(),
-            synthesizer_factory=CustomSynthesizerFactory(),
-            events_manager=ChessEventsManager()
-        )
-        logger.info(f"Updated synthesizer voice to: {req.voice} and reinitialized TelephonyServer")
+        logger.info(f"Updated voice to {req.voice}")
         return {"success": True, "voice": req.voice}
     except Exception as e:
-        logger.error(f"Failed to update voice: {e}")
+        logger.error(f"Failed to update voice: {e}", exc_info=True)
         raise HTTPException(500, f"Failed to update voice: {str(e)}")
 
 
@@ -28337,14 +28396,19 @@ async def check_active_call(lead_id: str):
 
 
 def load_leads_from_file(file_path: str):
-    if os.path.exists(file_path):
-        with open(file_path, "r") as f:
-            return json.load(f)
-    return []
+    lock_path = f"{file_path}.lock"
+    with FileLock(lock_path):
+        if os.path.exists(file_path):
+            with open(file_path, "r") as f:
+                leads = json.load(f)
+                return leads
+        return []
 
 def save_leads_to_file(leads: list, file_path: str):
-    with open(file_path, "w") as f:
-        json.dump(leads, f, indent=2)
+    lock_path = f"{file_path}.lock"
+    with FileLock(lock_path):
+        with open(file_path, "w") as f:
+            json.dump(leads, f, indent=2)
 
 # Main entrypoint (updated to include scheduler)
 if __name__ == "__main__":

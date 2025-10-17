@@ -19,3 +19,6 @@ langchain-core>=0.3.10
 aiohttp==3.10.10
 
 streamlit
+
+
+filelock== 3.20.0

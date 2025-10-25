@@ -31297,6 +31297,1307 @@
 
 
 
+# """
+# AI Calling System - Production Backend
+# Implements ALL Module 1 requirements with multi-tenant support
+# """
+
+# import os
+# import logging
+# import asyncio
+# import httpx
+# import typing
+# import time
+# import json
+# import re
+# from typing import Optional, Tuple, Dict, List
+# from datetime import datetime, timezone, timedelta
+# from pathlib import Path
+# from collections import defaultdict
+
+# from fastapi import FastAPI, Request, Response, HTTPException, BackgroundTasks
+# from fastapi.responses import JSONResponse
+# from pydantic import BaseModel, validator
+# from contextlib import asynccontextmanager
+# from dotenv import load_dotenv
+
+# import asyncpg
+# from twilio.rest import Client
+# from twilio.twiml.voice_response import VoiceResponse
+
+# # Vocode imports
+# from vocode.streaming.telephony.server.base import TelephonyServer, TwilioInboundCallConfig
+# from vocode.streaming.models.telephony import TwilioConfig
+# from vocode.streaming.models.agent import LangchainAgentConfig, AgentConfig
+# from vocode.streaming.agent.langchain_agent import LangchainAgent
+# from vocode.streaming.models.message import BaseMessage
+# from vocode.streaming.transcriber.deepgram_transcriber import DeepgramTranscriber
+# from vocode.streaming.models.transcriber import DeepgramTranscriberConfig, PunctuationEndpointingConfig
+# from vocode.streaming.synthesizer.stream_elements_synthesizer import StreamElementsSynthesizer
+# from vocode.streaming.models.synthesizer import StreamElementsSynthesizerConfig, SynthesizerConfig
+# from vocode.streaming.synthesizer.base_synthesizer import BaseSynthesizer
+# from vocode.streaming.telephony.config_manager.in_memory_config_manager import InMemoryConfigManager
+# from vocode.streaming.agent.base_agent import BaseAgent
+# from vocode.streaming.models.events import Event, EventType
+# from vocode.streaming.models.transcript import TranscriptCompleteEvent
+# from vocode.streaming.utils import events_manager
+
+# from langchain_groq import ChatGroq
+# from langchain.prompts import PromptTemplate
+# from langchain.chains import LLMChain
+
+
+# import aiosmtplib
+# from email.mime.text import MIMEText
+
+# # Configure logging
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# )
+# logger = logging.getLogger(__name__)
+
+# load_dotenv()
+
+# # ============================================
+# # CONFIGURATION & ENVIRONMENT
+# # ============================================
+
+# # Twilio Config
+# TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+# TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+# BASE_URL = os.getenv("BASE_URL")
+
+# # AI Config
+# GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+
+# # Database Config
+# DB_HOST = os.getenv("DB_HOST", "host.docker.internal")
+# DB_PORT = int(os.getenv("DB_PORT", 5432))
+# DB_NAME = os.getenv("DB_NAME", "whatsapp_crm")
+# DB_USER = os.getenv("DB_USER")
+# DB_PASSWORD = os.getenv("DB_PASSWORD")
+
+# # CRM Config
+# CRM_API_URL = os.getenv("CRM_API_URL", "http://localhost:3000/api")
+# CRM_API_KEY = os.getenv("CRM_API_KEY")
+
+# # Notification Config
+# EMAIL_SMTP_SERVER = os.getenv("EMAIL_SMTP_SERVER")
+# EMAIL_SMTP_PORT = int(os.getenv("EMAIL_SMTP_PORT", 587))
+# EMAIL_SENDER = os.getenv("EMAIL_SENDER")
+# EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+
+# # Storage
+# RECORDINGS_DIR = Path("recordings")
+# RECORDINGS_DIR.mkdir(exist_ok=True, parents=True)
+
+# # Validate critical vars
+# required_vars = [
+#     TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, BASE_URL,
+#     GROQ_API_KEY, DEEPGRAM_API_KEY,
+#     DB_USER, DB_PASSWORD
+# ]
+# if not all(required_vars):
+#     raise ValueError("Missing required environment variables")
+
+# # ============================================
+# # GLOBAL STATE & METRICS
+# # ============================================
+
+# db_pool: Optional[asyncpg.Pool] = None
+# llm = ChatGroq(model_name="llama-3.1-8b-instant", api_key=GROQ_API_KEY)
+
+# # In-memory stores (for active calls only)
+# ACTIVE_CALLS: Dict[str, Dict] = {}  # call_sid -> call_data
+# CONVERSATION_STORE: Dict[str, Dict] = {}  # call_sid -> conversation
+
+# # Rate limiting
+# MAX_CONCURRENT_CALLS = int(os.getenv("MAX_CONCURRENT_CALLS", 10))
+# CALL_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_CALLS)
+
+# # Metrics
+# METRICS = {
+#     "calls_initiated": defaultdict(int),
+#     "calls_completed": defaultdict(int),
+#     "calls_failed": defaultdict(int),
+#     "sentiment_distribution": defaultdict(int),
+#     "routing_decisions": defaultdict(int),
+#     "errors": defaultdict(int),
+#     "avg_call_duration": 0,
+#     "total_recordings": 0
+# }
+
+# # ============================================
+# # DATABASE FUNCTIONS
+# # ============================================
+
+# async def init_db():
+#     """Initialize database connection pool"""
+#     global db_pool
+#     db_pool = await asyncpg.create_pool(
+#         host=DB_HOST,
+#         port=DB_PORT,
+#         user=DB_USER,
+#         password=DB_PASSWORD,
+#         database=DB_NAME,
+#         min_size=5,
+#         max_size=20,
+#         command_timeout=60
+#     )
+#     logger.info("✅ Database pool initialized")
+
+# async def close_db():
+#     """Close database connection pool"""
+#     if db_pool:
+#         await db_pool.close()
+#         logger.info("🔴 Database pool closed")
+
+# async def get_company_config(company_id: int, prompt_key: str = None) -> Optional[Dict]:
+#     """Fetch company and agent config from database"""
+#     async with db_pool.acquire() as conn:
+#         # Get company info
+#         company = await conn.fetchrow(
+#             "SELECT * FROM companies WHERE id = $1", company_id
+#         )
+#         if not company:
+#             return None
+        
+#         # Get agent config
+#         query = """
+#             SELECT * FROM agent_configs 
+#             WHERE company_id = $1 AND is_active = TRUE
+#         """
+#         params = [company_id]
+        
+#         if prompt_key:
+#             query += " AND prompt_key = $2"
+#             params.append(prompt_key)
+#         else:
+#             query += " LIMIT 1"
+        
+#         agent_config = await conn.fetchrow(query, *params)
+        
+#         if not agent_config:
+#             return None
+        
+#         return {
+#             "company": dict(company),
+#             "agent": dict(agent_config)
+#         }
+
+# async def save_call_log(
+#     call_sid: str,
+#     company_id: int,
+#     lead_id: int,
+#     to_phone: str,
+#     from_phone: str,
+#     call_type: str,
+#     call_status: str,
+#     call_duration: int = None,
+#     transcript: str = None,
+#     sentiment: Dict = None,
+#     summary: Dict = None,
+#     conversation_history: List = None,
+#     recording_url: str = None,
+#     local_audio_path: str = None
+# ):
+#     """Save or update call log in database"""
+#     async with db_pool.acquire() as conn:
+#         await conn.execute("""
+#             INSERT INTO call_logs (
+#                 call_sid, company_id, lead_id, to_phone, from_phone,
+#                 call_type, call_status, call_duration, transcript,
+#                 sentiment, summary, conversation_history,
+#                 recording_url, local_audio_path
+#             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+#             ON CONFLICT (call_sid) DO UPDATE SET
+#                 call_status = EXCLUDED.call_status,
+#                 call_duration = COALESCE(EXCLUDED.call_duration, call_logs.call_duration),
+#                 transcript = COALESCE(EXCLUDED.transcript, call_logs.transcript),
+#                 sentiment = COALESCE(EXCLUDED.sentiment, call_logs.sentiment),
+#                 summary = COALESCE(EXCLUDED.summary, call_logs.summary),
+#                 conversation_history = COALESCE(EXCLUDED.conversation_history, call_logs.conversation_history),
+#                 recording_url = COALESCE(EXCLUDED.recording_url, call_logs.recording_url),
+#                 local_audio_path = COALESCE(EXCLUDED.local_audio_path, call_logs.local_audio_path),
+#                 updated_at = CURRENT_TIMESTAMP
+#         """, call_sid, company_id, lead_id, to_phone, from_phone,
+#             call_type, call_status, call_duration, transcript,
+#             json.dumps(sentiment) if sentiment else None,
+#             json.dumps(summary) if summary else None,
+#             json.dumps(conversation_history) if conversation_history else None,
+#             recording_url, local_audio_path
+#         )
+
+# async def update_lead_status(lead_id: int, status: str, last_contacted: datetime = None):
+#     """Update lead status after call"""
+#     async with db_pool.acquire() as conn:
+#         await conn.execute("""
+#             UPDATE leads 
+#             SET lead_status = $1,
+#                 last_contacted = COALESCE($2, CURRENT_TIMESTAMP),
+#                 updated_at = CURRENT_TIMESTAMP
+#             WHERE id = $3
+#         """, status, last_contacted, lead_id)
+
+# async def get_pending_scheduled_calls() -> List[Dict]:
+#     """Fetch pending scheduled calls"""
+#     async with db_pool.acquire() as conn:
+#         rows = await conn.fetch("""
+#             SELECT sc.*, l.phone_number, l.name, l.email, l.company_id,
+#                    ac.prompt_key, ac.voice, ac.initial_message
+#             FROM scheduled_calls sc
+#             JOIN leads l ON sc.lead_id = l.id
+#             JOIN agent_configs ac ON sc.company_id = ac.company_id
+#             WHERE sc.status = 'pending' 
+#             AND sc.scheduled_time <= CURRENT_TIMESTAMP
+#             AND sc.retry_count < 3
+#             ORDER BY sc.scheduled_time ASC
+#             LIMIT 50
+#         """)
+#         return [dict(row) for row in rows]
+
+# async def update_scheduled_call(scheduled_id: int, status: str, call_sid: str = None):
+#     """Update scheduled call status"""
+#     async with db_pool.acquire() as conn:
+#         if status == "called":
+#             await conn.execute("""
+#                 UPDATE scheduled_calls 
+#                 SET status = $1, call_sid = $2, updated_at = CURRENT_TIMESTAMP
+#                 WHERE id = $3
+#             """, status, call_sid, scheduled_id)
+#         elif status == "failed":
+#             await conn.execute("""
+#                 UPDATE scheduled_calls 
+#                 SET status = $1, retry_count = retry_count + 1, 
+#                     updated_at = CURRENT_TIMESTAMP
+#                 WHERE id = $2
+#             """, status, scheduled_id)
+#         else:
+#             await conn.execute("""
+#                 UPDATE scheduled_calls 
+#                 SET status = $1, updated_at = CURRENT_TIMESTAMP
+#                 WHERE id = $2
+#             """, status, scheduled_id)
+
+# # ============================================
+# # AI PROCESSING FUNCTIONS
+# # ============================================
+
+# # Sentiment Analysis
+# sentiment_prompt = PromptTemplate(
+#     input_variables=["transcript"],
+#     template="""Analyze the sentiment of this call transcript and return ONLY a JSON object:
+# {
+#   "sentiment": "positive|neutral|negative|angry|confused",
+#   "tone_score": 1-10,
+#   "customer_emotion": "satisfied|frustrated|interested|uncertain",
+#   "urgency_level": "low|medium|high"
+# }
+
+# Transcript:
+# {transcript}
+
+# JSON:"""
+# )
+# sentiment_chain = LLMChain(llm=llm, prompt=sentiment_prompt)
+
+# # Summary Generation
+# summary_prompt = PromptTemplate(
+#     input_variables=["transcript"],
+#     template="""Generate a call summary and return ONLY a JSON object:
+# {
+#   "summary": "Brief 2-3 sentence summary",
+#   "intent": "interested|support|reminder|payment|information",
+#   "next_actions": ["action1", "action2"],
+#   "key_points": ["point1", "point2"],
+#   "customer_concerns": ["concern1"],
+#   "follow_up_required": true|false,
+#   "recommended_action": "specific action to take"
+# }
+
+# Transcript:
+# {transcript}
+
+# JSON:"""
+# )
+# summary_chain = LLMChain(llm=llm, prompt=summary_prompt)
+
+# async def analyze_sentiment(transcript: str) -> Dict:
+#     """Analyze call sentiment using LLM"""
+#     try:
+#         result = await sentiment_chain.ainvoke({"transcript": transcript})
+#         text = result.get('text', '{}')
+        
+#         # Extract JSON from response
+#         start = text.find('{')
+#         end = text.rfind('}') + 1
+#         if start != -1 and end > start:
+#             text = text[start:end]
+        
+#         sentiment = json.loads(text)
+        
+#         # Update metrics
+#         METRICS["sentiment_distribution"][sentiment.get("sentiment", "unknown")] += 1
+        
+#         return sentiment
+#     except Exception as e:
+#         logger.error(f"Sentiment analysis failed: {e}")
+#         return {
+#             "sentiment": "neutral",
+#             "tone_score": 5,
+#             "customer_emotion": "unknown",
+#             "urgency_level": "medium"
+#         }
+
+# async def generate_summary(transcript: str) -> Dict:
+#     """Generate call summary using LLM"""
+#     try:
+#         result = await summary_chain.ainvoke({"transcript": transcript})
+#         text = result.get('text', '{}')
+        
+#         # Extract JSON
+#         start = text.find('{')
+#         end = text.rfind('}') + 1
+#         if start != -1 and end > start:
+#             text = text[start:end]
+        
+#         summary = json.loads(text)
+#         return summary
+#     except Exception as e:
+#         logger.error(f"Summary generation failed: {e}")
+#         return {
+#             "summary": "Call completed",
+#             "intent": "unknown",
+#             "next_actions": [],
+#             "key_points": [],
+#             "customer_concerns": [],
+#             "follow_up_required": False,
+#             "recommended_action": "Review manually"
+#         }
+
+# async def route_based_on_sentiment(sentiment: Dict, lead_id: int) -> str:
+#     """Route call to appropriate team based on sentiment"""
+#     sentiment_type = sentiment.get("sentiment", "neutral")
+#     urgency = sentiment.get("urgency_level", "medium")
+#     tone_score = sentiment.get("tone_score", 5)
+    
+#     # Routing logic
+#     if sentiment_type == "angry" or tone_score <= 3:
+#         team = "senior_support"
+#         METRICS["routing_decisions"]["angry_escalation"] += 1
+#     elif sentiment_type == "confused" or urgency == "high":
+#         team = "specialist"
+#         METRICS["routing_decisions"]["specialist_required"] += 1
+#     elif sentiment_type == "positive" and tone_score >= 8:
+#         team = "sales_closer"
+#         METRICS["routing_decisions"]["hot_lead"] += 1
+#     else:
+#         team = "general_sales"
+#         METRICS["routing_decisions"]["standard"] += 1
+    
+#     # Log routing decision
+#     logger.info(f"Lead {lead_id} routed to {team} (sentiment={sentiment_type}, score={tone_score})")
+    
+#     return team
+
+# # ============================================
+# # NOTIFICATION FUNCTIONS
+# # ============================================
+
+# async def send_email_summary(to_email: str, subject: str, body: str):
+#     """Send email summary (async)"""
+#     try:
+        
+        
+#         msg = MIMEText(body)
+#         msg['Subject'] = subject
+#         msg['From'] = EMAIL_SENDER
+#         msg['To'] = to_email
+        
+#         await aiosmtplib.send(
+#             msg,
+#             hostname=EMAIL_SMTP_SERVER,
+#             port=EMAIL_SMTP_PORT,
+#             username=EMAIL_SENDER,
+#             password=EMAIL_PASSWORD,
+#             start_tls=True
+#         )
+#         logger.info(f"Email sent to {to_email}")
+#     except Exception as e:
+#         logger.error(f"Failed to send email: {e}")
+#         METRICS["errors"]["email_failed"] += 1
+
+# async def send_whatsapp_summary(to_phone: str, body: str):
+#     """Send WhatsApp summary via Twilio"""
+#     try:
+#         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        
+#         await asyncio.get_event_loop().run_in_executor(
+#             None,
+#             lambda: client.messages.create(
+#                 from_=f'whatsapp:+19784045213',  # Your WhatsApp number
+#                 body=body,
+#                 to=f'whatsapp:{to_phone}'
+#             )
+#         )
+#         logger.info(f"WhatsApp sent to {to_phone}")
+#     except Exception as e:
+#         logger.error(f"Failed to send WhatsApp: {e}")
+#         METRICS["errors"]["whatsapp_failed"] += 1
+
+# async def update_crm(lead_id: int, call_data: Dict):
+#     """Update external CRM via API"""
+#     try:
+#         async with httpx.AsyncClient(timeout=10.0) as client:
+#             response = await client.post(
+#                 f"{CRM_API_URL}/webhook/call-completed",
+#                 json=call_data,
+#                 headers={"Authorization": f"Bearer {CRM_API_KEY}"}
+#             )
+#             response.raise_for_status()
+#             logger.info(f"CRM updated for lead {lead_id}")
+#     except Exception as e:
+#         logger.error(f"CRM update failed: {e}")
+#         METRICS["errors"]["crm_update_failed"] += 1
+
+# # ============================================
+# # CUSTOM EVENTS MANAGER
+# # ============================================
+
+# class ProductionEventsManager(events_manager.EventsManager):
+#     """Enhanced events manager with full Module 1 features"""
+    
+#     def __init__(self):
+#         super().__init__(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
+    
+#     async def handle_event(self, event: Event):
+#         if event.type == EventType.TRANSCRIPT_COMPLETE:
+#             await self._handle_transcript_complete(event)
+    
+#     async def _handle_transcript_complete(self, event: TranscriptCompleteEvent):
+#         """Process completed call transcript with ALL features"""
+#         call_sid = event.conversation_id
+        
+#         try:
+#             # Get conversation data
+#             if call_sid not in CONVERSATION_STORE:
+#                 logger.warning(f"No conversation data for {call_sid}")
+#                 return
+            
+#             conv_data = CONVERSATION_STORE[call_sid]
+#             transcript_text = event.transcript.to_string()
+            
+#             logger.info(f"📝 Processing transcript for {call_sid}")
+            
+#             # 1. Analyze Sentiment (Module 1 Req)
+#             sentiment = await analyze_sentiment(transcript_text)
+#             logger.info(f"😊 Sentiment: {sentiment['sentiment']} (score: {sentiment.get('tone_score')})")
+            
+#             # 2. Generate Summary (Module 1 Req)
+#             summary = await generate_summary(transcript_text)
+#             logger.info(f"📋 Intent: {summary['intent']}, Follow-up: {summary.get('follow_up_required')}")
+            
+#             # 3. Route Based on Sentiment (Module 1 Req)
+#             lead_id = conv_data.get("lead_id")
+#             if lead_id:
+#                 routing_team = await route_based_on_sentiment(sentiment, lead_id)
+#                 summary["routed_to"] = routing_team
+            
+#             # 4. Build Conversation Turns
+#             turns = [
+#                 {
+#                     "speaker": turn.speaker,
+#                     "text": turn.text,
+#                     "timestamp": turn.timestamp or int(time.time() * 1000)
+#                 }
+#                 for turn in event.transcript.turns
+#             ]
+            
+#             # 5. Fetch Twilio Recording URL (Module 1 Req)
+#             recording_url = None
+#             try:
+#                 client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+#                 recordings = await asyncio.get_event_loop().run_in_executor(
+#                     None,
+#                     lambda: client.recordings.list(call_sid=call_sid, limit=1)
+#                 )
+#                 if recordings:
+#                     recording_url = f"https://api.twilio.com{recordings[0].uri.replace('.json', '.mp3')}"
+#                     METRICS["total_recordings"] += 1
+#             except Exception as e:
+#                 logger.error(f"Failed to fetch recording: {e}")
+            
+#             # 6. Get Call Duration
+#             call_duration = 0
+#             try:
+#                 client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+#                 call = await asyncio.get_event_loop().run_in_executor(
+#                     None,
+#                     lambda: client.calls(call_sid).fetch()
+#                 )
+#                 call_duration = int(call.duration) if call.duration else 0
+                
+#                 # Update avg duration metric
+#                 if call_duration > 0:
+#                     current_avg = METRICS["avg_call_duration"]
+#                     total_completed = sum(METRICS["calls_completed"].values())
+#                     METRICS["avg_call_duration"] = (
+#                         (current_avg * (total_completed - 1) + call_duration) / total_completed
+#                         if total_completed > 0 else call_duration
+#                     )
+#             except Exception as e:
+#                 logger.debug(f"Could not fetch call duration: {e}")
+            
+#             # 7. Save to Database (Module 1 Req)
+#             await save_call_log(
+#                 call_sid=call_sid,
+#                 company_id=conv_data.get("company_id"),
+#                 lead_id=lead_id,
+#                 to_phone=conv_data.get("to_phone"),
+#                 from_phone=conv_data.get("from_phone"),
+#                 call_type=conv_data.get("call_type", "qualification"),
+#                 call_status="completed",
+#                 call_duration=call_duration,
+#                 transcript=transcript_text,
+#                 sentiment=sentiment,
+#                 summary=summary,
+#                 conversation_history=turns,
+#                 recording_url=recording_url
+#             )
+            
+#             # 8. Update Lead Status (Module 1 Req)
+#             if lead_id:
+#                 new_status = "qualified" if summary.get("intent") == "interested" else "contacted"
+#                 await update_lead_status(lead_id, new_status)
+            
+#             # 9. Send Notifications (Module 1 Req - Email & WhatsApp)
+#             if conv_data.get("email"):
+#                 email_body = f"""Call Summary
+
+# Duration: {call_duration}s
+# Sentiment: {sentiment['sentiment']} ({sentiment.get('tone_score')}/10)
+
+# Summary:
+# {summary['summary']}
+
+# Next Actions:
+# {chr(10).join(f'- {action}' for action in summary.get('next_actions', []))}
+
+# Recording: {recording_url or 'Processing...'}
+# """
+#                 await send_email_summary(
+#                     conv_data["email"],
+#                     "Call Summary - 4champz",
+#                     email_body
+#                 )
+            
+#             if conv_data.get("to_phone"):
+#                 whatsapp_body = f"📞 Call Summary: {summary['summary'][:100]}... Next: {', '.join(summary.get('next_actions', [])[:2])}"
+#                 await send_whatsapp_summary(conv_data["to_phone"], whatsapp_body)
+            
+#             # 10. Update External CRM (Module 1 Req)
+#             if lead_id:
+#                 await update_crm(lead_id, {
+#                     "lead_id": lead_id,
+#                     "call_sid": call_sid,
+#                     "transcript": transcript_text,
+#                     "sentiment": sentiment,
+#                     "summary": summary,
+#                     "recording_url": recording_url,
+#                     "duration": call_duration
+#                 })
+            
+#             # 11. Update Metrics
+#             call_type = conv_data.get("call_type", "unknown")
+#             METRICS["calls_completed"][call_type] += 1
+            
+#             logger.info(f"✅ Call {call_sid} processed successfully")
+            
+#             # 12. Cleanup after delay
+#             asyncio.create_task(self._cleanup_conversation(call_sid))
+            
+#         except Exception as e:
+#             logger.error(f"❌ Error processing transcript for {call_sid}: {e}", exc_info=True)
+#             METRICS["errors"]["transcript_processing"] += 1
+    
+#     async def _cleanup_conversation(self, call_sid: str):
+#         """Clean up conversation data after 5 minutes"""
+#         await asyncio.sleep(300)
+#         CONVERSATION_STORE.pop(call_sid, None)
+#         ACTIVE_CALLS.pop(call_sid, None)
+#         logger.debug(f"🧹 Cleaned up conversation {call_sid}")
+
+# # ============================================
+# # CUSTOM AGENT
+# # ============================================
+
+# class CustomLangchainAgentConfig(LangchainAgentConfig, type="agent_langchain"):
+#     initial_message: BaseMessage
+#     prompt_preamble: str
+#     model_name: str = "llama-3.1-8b-instant"
+#     api_key: str = GROQ_API_KEY
+#     provider: str = "groq"
+
+# class ProductionLangchainAgent(LangchainAgent):
+#     """Production agent with enhanced features"""
+    
+#     def __init__(self, agent_config: CustomLangchainAgentConfig, conversation_id: str = None):
+#         super().__init__(agent_config=agent_config)
+#         self.conversation_id_cache = conversation_id
+#         self.no_input_count = 0
+#         self.last_response_time = time.time()
+    
+#     async def respond(self, human_input: str, conversation_id: str, is_interrupt: bool = False) -> Tuple[Optional[str], bool]:
+#         try:
+#             # Reset no-input counter on valid input
+#             if human_input and len(human_input.strip()) > 2:
+#                 self.no_input_count = 0
+#                 self.last_response_time = time.time()
+#             else:
+#                 self.no_input_count += 1
+            
+#             # Handle timeout
+#             if self.no_input_count >= 3:
+#                 return "I haven't heard from you. I'll follow up later. Thank you!", True
+            
+#             # Generate response
+#             response, should_end = await super().respond(human_input, conversation_id, is_interrupt)
+            
+#             return response, should_end
+            
+#         except Exception as e:
+#             logger.error(f"Agent response error: {e}")
+#             return "I'm having trouble processing that. Could you repeat?", False
+
+# # ============================================
+# # OUTBOUND CALLING
+# # ============================================
+
+# async def make_outbound_call(
+#     company_id: int,
+#     lead_id: int,
+#     to_phone: str,
+#     name: str,
+#     call_type: str = "qualification",
+#     prompt_key: str = None
+# ) -> str:
+#     """
+#     Make outbound call with full Module 1 features
+    
+#     Returns: call_sid
+#     """
+#     async with CALL_SEMAPHORE:
+#         try:
+#             # 1. Get company config
+#             config = await get_company_config(company_id, prompt_key)
+#             if not config:
+#                 raise ValueError(f"No config found for company {company_id}")
+            
+#             company = config["company"]
+#             agent_cfg = config["agent"]
+            
+#             # 2. Customize initial message
+#             initial_msg = agent_cfg["initial_message"].replace("{{name}}", name or "there")
+            
+#             # 3. Create Twilio call
+#             client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            
+#             call = await asyncio.get_event_loop().run_in_executor(
+#                 None,
+#                 lambda: client.calls.create(
+#                     to=to_phone,
+#                     from_=company["phone_number"],
+#                     url=f"https://{BASE_URL}/inbound_call",
+#                     status_callback=f"https://{BASE_URL}/call_status",
+#                     status_callback_method="POST",
+#                     status_callback_event=["initiated", "ringing", "answered", "completed"],
+#                     record=True,
+#                     recording_channels="dual",
+#                     recording_status_callback=f"https://{BASE_URL}/recording_status",
+#                     recording_status_callback_method="POST"
+#                 )
+#             )
+            
+#             call_sid = call.sid
+            
+#             # 4. Store conversation data
+#             CONVERSATION_STORE[call_sid] = {
+#                 "call_sid": call_sid,
+#                 "company_id": company_id,
+#                 "lead_id": lead_id,
+#                 "to_phone": to_phone,
+#                 "from_phone": company["phone_number"],
+#                 "name": name,
+#                 "call_type": call_type,
+#                 "prompt_key": prompt_key,
+#                 "started_at": datetime.now(timezone.utc).isoformat()
+#             }
+            
+#             ACTIVE_CALLS[call_sid] = CONVERSATION_STORE[call_sid]
+            
+#             # 5. Save initial log
+#             await save_call_log(
+#                 call_sid=call_sid,
+#                 company_id=company_id,
+#                 lead_id=lead_id,
+#                 to_phone=to_phone,
+#                 from_phone=company["phone_number"],
+#                 call_type=call_type,
+#                 call_status="initiated"
+#             )
+            
+#             # 6. Update metrics
+#             METRICS["calls_initiated"][call_type] += 1
+            
+#             logger.info(f"📞 Call initiated: {call_sid} -> {to_phone}")
+            
+#             return call_sid
+            
+#         except Exception as e:
+#             logger.error(f"Failed to make call: {e}", exc_info=True)
+#             METRICS["errors"]["call_initiation"] += 1
+#             raise
+
+# # ============================================
+# # SCHEDULER
+# # ============================================
+
+# async def outbound_call_scheduler():
+#     """Poll database for scheduled calls and execute them"""
+#     logger.info("🚀 Starting outbound call scheduler")
+    
+#     while True:
+#         try:
+#             # Fetch pending calls
+#             pending_calls = await get_pending_scheduled_calls()
+            
+#             logger.debug(f"Scheduler: {len(pending_calls)} pending calls")
+            
+#             for call_data in pending_calls:
+#                 try:
+#                     # Make call
+#                     call_sid = await make_outbound_call(
+#                         company_id=call_data["company_id"],
+#                         lead_id=call_data["lead_id"],
+#                         to_phone=call_data["phone_number"],
+#                         name=call_data["name"],
+#                         call_type=call_data["call_type"],
+#                         prompt_key=call_data["prompt_key"]
+#                     )
+                    
+#                     # Update scheduled call status
+#                     await update_scheduled_call(call_data["id"], "called", call_sid)
+                    
+#                     logger.info(f"✅ Scheduled call executed: {call_sid}")
+                    
+#                 except Exception as e:
+#                     logger.error(f"Failed to execute scheduled call {call_data['id']}: {e}")
+#                     await update_scheduled_call(call_data["id"], "failed")
+#                     METRICS["calls_failed"][call_data["call_type"]] += 1
+                
+#                 # Rate limiting between calls
+#                 await asyncio.sleep(2)
+            
+#             # Poll every 30 seconds
+#             await asyncio.sleep(30)
+            
+#         except Exception as e:
+#             logger.error(f"Scheduler error: {e}", exc_info=True)
+#             await asyncio.sleep(30)
+
+# # ============================================
+# # FASTAPI APP & ENDPOINTS
+# # ============================================
+
+# @asynccontextmanager
+# async def lifespan(app: FastAPI):
+#     """App lifecycle manager"""
+#     # Startup
+#     await init_db()
+#     scheduler_task = asyncio.create_task(outbound_call_scheduler())
+#     logger.info("✅ App started")
+    
+#     yield
+    
+#     # Shutdown
+#     scheduler_task.cancel()
+#     await close_db()
+#     logger.info("🔴 App shutdown")
+
+# app = FastAPI(title="AI Calling System", lifespan=lifespan)
+
+# # Pydantic Models
+# class OutboundCallRequest(BaseModel):
+#     company_id: int
+#     lead_id: int
+#     to_phone: str
+#     name: str
+#     call_type: str = "qualification"
+#     prompt_config_key: Optional[str] = None
+    
+#     @validator("to_phone")
+#     def normalize_phone(cls, v):
+#         # Remove all non-digits
+#         digits = re.sub(r'\D', '', v)
+#         # Add +91 if 10 digits
+#         if len(digits) == 10:
+#             return f"+91{digits}"
+#         elif not digits.startswith('+'):
+#             return f"+{digits}"
+#         return v
+
+# class ScheduleCallRequest(BaseModel):
+#     company_id: int
+#     lead_id: int
+#     call_type: str
+#     scheduled_time: str  # ISO format
+    
+#     @validator("scheduled_time")
+#     def validate_time(cls, v):
+#         try:
+#             datetime.fromisoformat(v.replace('Z', '+00:00'))
+#             return v
+#         except:
+#             raise ValueError("Invalid ISO format")
+
+# # ============================================
+# # API ENDPOINTS
+# # ============================================
+
+# @app.get("/health")
+# async def health_check():
+#     """Health check endpoint"""
+#     return {
+#         "status": "healthy",
+#         "timestamp": datetime.now(timezone.utc).isoformat(),
+#         "active_calls": len(ACTIVE_CALLS),
+#         "db_connected": db_pool is not None
+#     }
+
+# @app.post("/api/outbound-call")
+# async def trigger_outbound_call(req: OutboundCallRequest, background_tasks: BackgroundTasks):
+#     """
+#     Trigger immediate outbound call
+    
+#     Module 1 Requirement: Outbound calling API
+#     """
+#     try:
+#         call_sid = await make_outbound_call(
+#             company_id=req.company_id,
+#             lead_id=req.lead_id,
+#             to_phone=req.to_phone,
+#             name=req.name,
+#             call_type=req.call_type,
+#             prompt_key=req.prompt_config_key
+#         )
+        
+#         return {
+#             "success": True,
+#             "call_sid": call_sid,
+#             "message": "Call initiated"
+#         }
+        
+#     except Exception as e:
+#         logger.error(f"Outbound call failed: {e}")
+#         raise HTTPException(status_code=500, detail=str(e))
+
+# @app.post("/api/schedule-call")
+# async def schedule_call(req: ScheduleCallRequest):
+#     """
+#     Schedule a call for later execution
+    
+#     Module 1 Requirement: Scheduled calling
+#     """
+#     try:
+#         async with db_pool.acquire() as conn:
+#             await conn.execute("""
+#                 INSERT INTO scheduled_calls 
+#                 (company_id, lead_id, call_type, scheduled_time)
+#                 VALUES ($1, $2, $3, $4)
+#             """, req.company_id, req.lead_id, req.call_type, 
+#                 datetime.fromisoformat(req.scheduled_time.replace('Z', '+00:00'))
+#             )
+        
+#         return {
+#             "success": True,
+#             "message": "Call scheduled"
+#         }
+        
+#     except Exception as e:
+#         logger.error(f"Schedule call failed: {e}")
+#         raise HTTPException(status_code=500, detail=str(e))
+
+# @app.post("/call_status")
+# async def call_status_callback(request: Request):
+#     """
+#     Twilio call status callback
+    
+#     Module 1 Requirement: Call status tracking
+#     """
+#     try:
+#         form_data = await request.form()
+#         call_sid = form_data.get("CallSid")
+#         call_status = form_data.get("CallStatus")
+        
+#         logger.info(f"Call status: {call_sid} -> {call_status}")
+        
+#         # Update database
+#         if call_sid in CONVERSATION_STORE:
+#             conv = CONVERSATION_STORE[call_sid]
+            
+#             await save_call_log(
+#                 call_sid=call_sid,
+#                 company_id=conv.get("company_id"),
+#                 lead_id=conv.get("lead_id"),
+#                 to_phone=conv.get("to_phone"),
+#                 from_phone=conv.get("from_phone"),
+#                 call_type=conv.get("call_type"),
+#                 call_status=call_status
+#             )
+            
+#             # Update metrics
+#             if call_status == "completed":
+#                 METRICS["calls_completed"][conv.get("call_type", "unknown")] += 1
+#             elif call_status in ["failed", "busy", "no-answer"]:
+#                 METRICS["calls_failed"][conv.get("call_type", "unknown")] += 1
+        
+#         return {"ok": True}
+        
+#     except Exception as e:
+#         logger.error(f"Call status callback error: {e}")
+#         return {"ok": False}
+
+# @app.post("/recording_status")
+# async def recording_status_callback(request: Request):
+#     """
+#     Twilio recording status callback
+    
+#     Module 1 Requirement: Call recording
+#     """
+#     try:
+#         form_data = await request.form()
+#         call_sid = form_data.get("CallSid")
+#         recording_url = form_data.get("RecordingUrl")
+#         recording_status = form_data.get("RecordingStatus")
+        
+#         logger.info(f"Recording status: {call_sid} -> {recording_status}")
+        
+#         if recording_status == "completed" and recording_url:
+#             # Update database
+#             if call_sid in CONVERSATION_STORE:
+#                 conv = CONVERSATION_STORE[call_sid]
+                
+#                 await save_call_log(
+#                     call_sid=call_sid,
+#                     company_id=conv.get("company_id"),
+#                     lead_id=conv.get("lead_id"),
+#                     to_phone=conv.get("to_phone"),
+#                     from_phone=conv.get("from_phone"),
+#                     call_type=conv.get("call_type"),
+#                     call_status="completed",
+#                     recording_url=recording_url
+#                 )
+        
+#         return {"ok": True}
+        
+#     except Exception as e:
+#         logger.error(f"Recording callback error: {e}")
+#         return {"ok": False}
+
+# @app.get("/api/call-logs/{call_sid}")
+# async def get_call_log(call_sid: str):
+#     """
+#     Get call log details
+    
+#     Module 1 Requirement: Call history access
+#     """
+#     try:
+#         async with db_pool.acquire() as conn:
+#             row = await conn.fetchrow(
+#                 "SELECT * FROM call_logs WHERE call_sid = $1",
+#                 call_sid
+#             )
+            
+#             if not row:
+#                 raise HTTPException(status_code=404, detail="Call not found")
+            
+#             return dict(row)
+            
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.error(f"Get call log failed: {e}")
+#         raise HTTPException(status_code=500, detail=str(e))
+
+# @app.get("/api/call-logs/lead/{lead_id}")
+# async def get_lead_call_logs(lead_id: int, limit: int = 50):
+#     """
+#     Get all call logs for a lead
+    
+#     Module 1 Requirement: Lead call history
+#     """
+#     try:
+#         async with db_pool.acquire() as conn:
+#             rows = await conn.fetch("""
+#                 SELECT * FROM call_logs 
+#                 WHERE lead_id = $1 
+#                 ORDER BY created_at DESC 
+#                 LIMIT $2
+#             """, lead_id, limit)
+            
+#             return [dict(row) for row in rows]
+            
+#     except Exception as e:
+#         logger.error(f"Get lead calls failed: {e}")
+#         raise HTTPException(status_code=500, detail=str(e))
+
+# @app.get("/api/metrics")
+# async def get_metrics():
+#     """
+#     Get system metrics
+    
+#     Module 1 Requirement: Reporting & analytics
+#     """
+#     return {
+#         "calls_initiated": dict(METRICS["calls_initiated"]),
+#         "calls_completed": dict(METRICS["calls_completed"]),
+#         "calls_failed": dict(METRICS["calls_failed"]),
+#         "sentiment_distribution": dict(METRICS["sentiment_distribution"]),
+#         "routing_decisions": dict(METRICS["routing_decisions"]),
+#         "errors": dict(METRICS["errors"]),
+#         "avg_call_duration_seconds": round(METRICS["avg_call_duration"], 2),
+#         "total_recordings": METRICS["total_recordings"],
+#         "active_calls": len(ACTIVE_CALLS),
+#         "timestamp": datetime.now(timezone.utc).isoformat()
+#     }
+
+# @app.get("/api/active-calls")
+# async def get_active_calls():
+#     """Get list of currently active calls"""
+#     return {
+#         "count": len(ACTIVE_CALLS),
+#         "calls": [
+#             {
+#                 "call_sid": call_sid,
+#                 "to_phone": data.get("to_phone"),
+#                 "name": data.get("name"),
+#                 "call_type": data.get("call_type"),
+#                 "started_at": data.get("started_at")
+#             }
+#             for call_sid, data in ACTIVE_CALLS.items()
+#         ]
+#     }
+
+# @app.post("/api/companies")
+# async def create_company(name: str, phone_number: str):
+#     """
+#     Create a new company (multi-tenant)
+    
+#     Module 1 Requirement: Multi-tenant support
+#     """
+#     try:
+#         async with db_pool.acquire() as conn:
+#             company_id = await conn.fetchval("""
+#                 INSERT INTO companies (name, phone_number)
+#                 VALUES ($1, $2)
+#                 RETURNING id
+#             """, name, phone_number)
+            
+#             return {
+#                 "success": True,
+#                 "company_id": company_id
+#             }
+            
+#     except Exception as e:
+#         logger.error(f"Create company failed: {e}")
+#         raise HTTPException(status_code=500, detail=str(e))
+
+# @app.post("/api/agent-configs")
+# async def create_agent_config(
+#     company_id: int,
+#     prompt_key: str,
+#     prompt_preamble: str,
+#     initial_message: str,
+#     voice: str = "Brian",
+#     model_name: str = "llama-3.1-8b-instant"
+# ):
+#     """
+#     Create/update agent configuration
+    
+#     Module 1 Requirement: Customizable AI agents per company
+#     """
+#     try:
+#         async with db_pool.acquire() as conn:
+#             await conn.execute("""
+#                 INSERT INTO agent_configs 
+#                 (company_id, prompt_key, prompt_preamble, initial_message, voice, model_name)
+#                 VALUES ($1, $2, $3, $4, $5, $6)
+#                 ON CONFLICT (company_id, prompt_key) DO UPDATE SET
+#                     prompt_preamble = EXCLUDED.prompt_preamble,
+#                     initial_message = EXCLUDED.initial_message,
+#                     voice = EXCLUDED.voice,
+#                     model_name = EXCLUDED.model_name,
+#                     updated_at = CURRENT_TIMESTAMP
+#             """, company_id, prompt_key, prompt_preamble, initial_message, voice, model_name)
+            
+#             return {
+#                 "success": True,
+#                 "message": "Agent config saved"
+#             }
+            
+#     except Exception as e:
+#         logger.error(f"Create agent config failed: {e}")
+#         raise HTTPException(status_code=500, detail=str(e))
+
+# @app.get("/api/agent-configs/{company_id}")
+# async def get_agent_configs(company_id: int):
+#     """Get all agent configs for a company"""
+#     try:
+#         async with db_pool.acquire() as conn:
+#             rows = await conn.fetch(
+#                 "SELECT * FROM agent_configs WHERE company_id = $1 AND is_active = TRUE",
+#                 company_id
+#             )
+#             return [dict(row) for row in rows]
+            
+#     except Exception as e:
+#         logger.error(f"Get agent configs failed: {e}")
+#         raise HTTPException(status_code=500, detail=str(e))
+
+# # ============================================
+# # VOCODE INTEGRATION
+# # ============================================
+
+# config_manager = InMemoryConfigManager()
+
+# class CustomAgentFactory:
+#     """Factory for creating agents with company-specific configs"""
+    
+#     def create_agent(
+#         self, 
+#         agent_config: AgentConfig, 
+#         logger: Optional[logging.Logger] = None,
+#         conversation_id: Optional[str] = None
+#     ) -> BaseAgent:
+#         if agent_config.type == "agent_langchain":
+#             return ProductionLangchainAgent(
+#                 agent_config=agent_config,
+#                 conversation_id=conversation_id
+#             )
+#         raise Exception(f"Invalid agent config: {agent_config.type}")
+
+# class CustomSynthesizerFactory:
+#     """Factory for creating synthesizers"""
+    
+#     def create_synthesizer(self, synthesizer_config: SynthesizerConfig) -> BaseSynthesizer:
+#         if isinstance(synthesizer_config, StreamElementsSynthesizerConfig):
+#             return StreamElementsSynthesizer(synthesizer_config)
+#         raise Exception(f"Invalid synthesizer config: {synthesizer_config.type}")
+
+# # Twilio config
+# twilio_config = TwilioConfig(
+#     account_sid=TWILIO_ACCOUNT_SID,
+#     auth_token=TWILIO_AUTH_TOKEN
+# )
+
+# # Default configs (will be overridden per call)
+# default_agent_config = CustomLangchainAgentConfig(
+#     initial_message=BaseMessage(text="Hello, this is AI calling system."),
+#     prompt_preamble="You are a helpful assistant.",
+#     model_name="llama-3.1-8b-instant",
+#     api_key=GROQ_API_KEY,
+#     provider="groq"
+# )
+
+# default_synthesizer_config = StreamElementsSynthesizerConfig.from_telephone_output_device(
+#     voice="Brian"
+# )
+
+# # default_transcriber_config = DeepgramTranscriberConfig(
+# #     api_key=DEEPGRAM_API_KEY,
+# #     model="nova-2-phonecall",
+# #     language="en"
+# # )
+
+# default_transcriber_config = DeepgramTranscriberConfig(
+#     api_key=DEEPGRAM_API_KEY,
+#     model="nova-2-phonecall",
+#     language="en",
+#     sampling_rate=8000,  # int primitive, not enum
+#     audio_encoding="mulaw",  # lowercase string, not enum
+#     chunk_size=320,
+#     endpointing_config=PunctuationEndpointingConfig(),
+#     downsampling=1,
+# )
+
+# # Telephony server
+# telephony_server = TelephonyServer(
+#     base_url=BASE_URL,
+#     config_manager=config_manager,
+#     inbound_call_configs=[
+#         TwilioInboundCallConfig(
+#             url="/inbound_call",
+#             twilio_config=twilio_config,
+#             agent_config=default_agent_config,
+#             synthesizer_config=default_synthesizer_config,
+#             transcriber_config=default_transcriber_config,
+#             record=True,
+#             status_callback=f"https://{BASE_URL}/call_status",
+#             recording_status_callback=f"https://{BASE_URL}/recording_status"
+#         )
+#     ],
+#     agent_factory=CustomAgentFactory(),
+#     synthesizer_factory=CustomSynthesizerFactory(),
+#     events_manager=ProductionEventsManager()
+# )
+
+# # Include telephony routes
+# app.include_router(telephony_server.get_router())
+
+# # ============================================
+# # MAIN
+# # ============================================
+
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 """
 AI Calling System - Production Backend
 Implements ALL Module 1 requirements with multi-tenant support
@@ -31454,8 +32755,43 @@ async def close_db():
         await db_pool.close()
         logger.info("🔴 Database pool closed")
 
-async def get_company_config(company_id: int, prompt_key: str = None) -> Optional[Dict]:
-    """Fetch company and agent config from database"""
+# async def get_company_config(company_id: int, prompt_key: str = None) -> Optional[Dict]:
+#     """Fetch company and agent config from database"""
+#     async with db_pool.acquire() as conn:
+#         # Get company info
+#         company = await conn.fetchrow(
+#             "SELECT * FROM companies WHERE id = $1", company_id
+#         )
+#         if not company:
+#             return None
+        
+#         # Get agent config
+#         query = """
+#             SELECT * FROM agent_configs 
+#             WHERE company_id = $1 AND is_active = TRUE
+#         """
+#         params = [company_id]
+        
+#         if prompt_key:
+#             query += " AND prompt_key = $2"
+#             params.append(prompt_key)
+#         else:
+#             query += " LIMIT 1"
+        
+#         agent_config = await conn.fetchrow(query, *params)
+        
+#         if not agent_config:
+#             return None
+        
+#         return {
+#             "company": dict(company),
+#             "agent": dict(agent_config)
+#         }
+
+
+
+async def get_company_config(company_id: int, prompt_key: str = None, agent_instance_id: int = None) -> Optional[Dict]:
+    """Fetch company, agent config, and agent instance from database"""
     async with db_pool.acquire() as conn:
         # Get company info
         company = await conn.fetchrow(
@@ -31464,28 +32800,62 @@ async def get_company_config(company_id: int, prompt_key: str = None) -> Optiona
         if not company:
             return None
         
-        # Get agent config
-        query = """
-            SELECT * FROM agent_configs 
-            WHERE company_id = $1 AND is_active = TRUE
-        """
-        params = [company_id]
+        # Get agent instance if provided
+        agent_instance = None
+        if agent_instance_id:
+            agent_instance = await conn.fetchrow(
+                "SELECT * FROM agent_instances WHERE id = $1 AND company_id = $2 AND is_active = TRUE",
+                agent_instance_id, company_id
+            )
         
-        if prompt_key:
-            query += " AND prompt_key = $2"
-            params.append(prompt_key)
+        # Get agent config (use instance's config or default)
+        config_id = agent_instance['agent_config_id'] if agent_instance else None
+        
+        if config_id:
+            agent_config = await conn.fetchrow(
+                "SELECT * FROM agent_configs WHERE id = $1", config_id
+            )
         else:
-            query += " LIMIT 1"
-        
-        agent_config = await conn.fetchrow(query, *params)
+            # Fallback to default config
+            query = """
+                SELECT * FROM agent_configs 
+                WHERE company_id = $1 AND is_active = TRUE
+            """
+            params = [company_id]
+            
+            if prompt_key:
+                query += " AND prompt_key = $2"
+                params.append(prompt_key)
+            else:
+                query += " LIMIT 1"
+            
+            agent_config = await conn.fetchrow(query, *params)
         
         if not agent_config:
             return None
         
+        # Override with agent instance customizations
+        if agent_instance:
+            agent_dict = dict(agent_config)
+            if agent_instance['custom_prompt']:
+                agent_dict['prompt_preamble'] = agent_instance['custom_prompt']
+            if agent_instance['custom_voice']:
+                agent_dict['voice'] = agent_instance['custom_voice']
+            if agent_instance['phone_number']:
+                company_dict = dict(company)
+                company_dict['phone_number'] = agent_instance['phone_number']
+                company = company_dict
+        else:
+            agent_dict = dict(agent_config)
+        
         return {
             "company": dict(company),
-            "agent": dict(agent_config)
+            "agent": agent_dict,
+            "agent_instance": dict(agent_instance) if agent_instance else None
         }
+
+
+
 
 async def save_call_log(
     call_sid: str,
@@ -31975,13 +33345,101 @@ class ProductionLangchainAgent(LangchainAgent):
 # OUTBOUND CALLING
 # ============================================
 
+# async def make_outbound_call(
+#     company_id: int,
+#     lead_id: int,
+#     to_phone: str,
+#     name: str,
+#     call_type: str = "qualification",
+#     prompt_key: str = None
+# ) -> str:
+#     """
+#     Make outbound call with full Module 1 features
+    
+#     Returns: call_sid
+#     """
+#     async with CALL_SEMAPHORE:
+#         try:
+#             # 1. Get company config
+#             config = await get_company_config(company_id, prompt_key)
+#             if not config:
+#                 raise ValueError(f"No config found for company {company_id}")
+            
+#             company = config["company"]
+#             agent_cfg = config["agent"]
+            
+#             # 2. Customize initial message
+#             initial_msg = agent_cfg["initial_message"].replace("{{name}}", name or "there")
+            
+#             # 3. Create Twilio call
+#             client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            
+#             call = await asyncio.get_event_loop().run_in_executor(
+#                 None,
+#                 lambda: client.calls.create(
+#                     to=to_phone,
+#                     from_=company["phone_number"],
+#                     url=f"https://{BASE_URL}/inbound_call",
+#                     status_callback=f"https://{BASE_URL}/call_status",
+#                     status_callback_method="POST",
+#                     status_callback_event=["initiated", "ringing", "answered", "completed"],
+#                     record=True,
+#                     recording_channels="dual",
+#                     recording_status_callback=f"https://{BASE_URL}/recording_status",
+#                     recording_status_callback_method="POST"
+#                 )
+#             )
+            
+#             call_sid = call.sid
+            
+#             # 4. Store conversation data
+#             CONVERSATION_STORE[call_sid] = {
+#                 "call_sid": call_sid,
+#                 "company_id": company_id,
+#                 "lead_id": lead_id,
+#                 "to_phone": to_phone,
+#                 "from_phone": company["phone_number"],
+#                 "name": name,
+#                 "call_type": call_type,
+#                 "prompt_key": prompt_key,
+#                 "started_at": datetime.now(timezone.utc).isoformat()
+#             }
+            
+#             ACTIVE_CALLS[call_sid] = CONVERSATION_STORE[call_sid]
+            
+#             # 5. Save initial log
+#             await save_call_log(
+#                 call_sid=call_sid,
+#                 company_id=company_id,
+#                 lead_id=lead_id,
+#                 to_phone=to_phone,
+#                 from_phone=company["phone_number"],
+#                 call_type=call_type,
+#                 call_status="initiated"
+#             )
+            
+#             # 6. Update metrics
+#             METRICS["calls_initiated"][call_type] += 1
+            
+#             logger.info(f"📞 Call initiated: {call_sid} -> {to_phone}")
+            
+#             return call_sid
+            
+#         except Exception as e:
+#             logger.error(f"Failed to make call: {e}", exc_info=True)
+#             METRICS["errors"]["call_initiation"] += 1
+#             raise
+
+
+
 async def make_outbound_call(
     company_id: int,
     lead_id: int,
     to_phone: str,
     name: str,
     call_type: str = "qualification",
-    prompt_key: str = None
+    prompt_key: str = None,
+    agent_instance_id: int = None  # NEW PARAMETER
 ) -> str:
     """
     Make outbound call with full Module 1 features
@@ -31990,25 +33448,29 @@ async def make_outbound_call(
     """
     async with CALL_SEMAPHORE:
         try:
-            # 1. Get company config
-            config = await get_company_config(company_id, prompt_key)
+            # 1. Get company config with agent instance support
+            config = await get_company_config(company_id, prompt_key, agent_instance_id)
             if not config:
                 raise ValueError(f"No config found for company {company_id}")
             
             company = config["company"]
             agent_cfg = config["agent"]
+            agent_instance = config.get("agent_instance")
             
             # 2. Customize initial message
             initial_msg = agent_cfg["initial_message"].replace("{{name}}", name or "there")
             
-            # 3. Create Twilio call
+            # 3. Determine which phone number to use
+            from_phone = agent_instance['phone_number'] if agent_instance and agent_instance['phone_number'] else company["phone_number"]
+            
+            # 4. Create Twilio call
             client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
             
             call = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: client.calls.create(
                     to=to_phone,
-                    from_=company["phone_number"],
+                    from_=from_phone,  # USE AGENT-SPECIFIC NUMBER
                     url=f"https://{BASE_URL}/inbound_call",
                     status_callback=f"https://{BASE_URL}/call_status",
                     status_callback_method="POST",
@@ -32022,36 +33484,38 @@ async def make_outbound_call(
             
             call_sid = call.sid
             
-            # 4. Store conversation data
+            # 5. Store conversation data with agent instance info
             CONVERSATION_STORE[call_sid] = {
                 "call_sid": call_sid,
                 "company_id": company_id,
                 "lead_id": lead_id,
                 "to_phone": to_phone,
-                "from_phone": company["phone_number"],
+                "from_phone": from_phone,
                 "name": name,
                 "call_type": call_type,
                 "prompt_key": prompt_key,
+                "agent_instance_id": agent_instance_id,  # NEW FIELD
+                "agent_name": agent_instance['agent_name'] if agent_instance else 'default',  # NEW FIELD
                 "started_at": datetime.now(timezone.utc).isoformat()
             }
             
             ACTIVE_CALLS[call_sid] = CONVERSATION_STORE[call_sid]
             
-            # 5. Save initial log
+            # 6. Save initial log
             await save_call_log(
                 call_sid=call_sid,
                 company_id=company_id,
                 lead_id=lead_id,
                 to_phone=to_phone,
-                from_phone=company["phone_number"],
+                from_phone=from_phone,
                 call_type=call_type,
                 call_status="initiated"
             )
             
-            # 6. Update metrics
+            # 7. Update metrics
             METRICS["calls_initiated"][call_type] += 1
             
-            logger.info(f"📞 Call initiated: {call_sid} -> {to_phone}")
+            logger.info(f"📞 Call initiated: {call_sid} -> {to_phone} via agent {agent_instance['agent_name'] if agent_instance else 'default'}")
             
             return call_sid
             
@@ -32059,6 +33523,8 @@ async def make_outbound_call(
             logger.error(f"Failed to make call: {e}", exc_info=True)
             METRICS["errors"]["call_initiation"] += 1
             raise
+
+
 
 # ============================================
 # SCHEDULER
@@ -32202,6 +33668,38 @@ async def trigger_outbound_call(req: OutboundCallRequest, background_tasks: Back
     except Exception as e:
         logger.error(f"Outbound call failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/outbound-call-agent")
+async def trigger_outbound_call_with_agent(req: OutboundCallRequest, agent_instance_id: int, background_tasks: BackgroundTasks):
+    """
+    Trigger outbound call with specific agent instance
+    
+    NEW ENDPOINT for CloserX-like agent support
+    """
+    try:
+        call_sid = await make_outbound_call(
+            company_id=req.company_id,
+            lead_id=req.lead_id,
+            to_phone=req.to_phone,
+            name=req.name,
+            call_type=req.call_type,
+            prompt_key=req.prompt_config_key,
+            agent_instance_id=agent_instance_id  # NEW PARAMETER
+        )
+        
+        return {
+            "success": True,
+            "call_sid": call_sid,
+            "agent_instance_id": agent_instance_id,
+            "message": "Call initiated with agent instance"
+        }
+        
+    except Exception as e:
+        logger.error(f"Outbound call with agent failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+        
 
 @app.post("/api/schedule-call")
 async def schedule_call(req: ScheduleCallRequest):

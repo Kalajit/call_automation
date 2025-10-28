@@ -13,6 +13,17 @@ COPY requirements.txt .
 RUN ls -l requirements.txt || (echo "requirements.txt not found" && exit 1)
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Download FastText model (lid.176.bin)
+RUN python -c "\
+import fasttext, fasttext.util; \
+fasttext.util.download_model('en', if_exists='ignore'); \
+model = fasttext.load_model('lid.176.bin'); \
+model.save_model('/app/lid.176.bin') \
+"
+
 COPY . .
+
+# Expose port
+EXPOSE 8000
 
 CMD uvicorn call_chess_coach:app --host 0.0.0.0 --port $PORT

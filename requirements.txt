@@ -29,4 +29,10 @@ asyncpg == 0.30.0
 aiosmtplib 
 
 
-googletrans 4.0.2
+# libretranslate==1.3.9  # FREE self-hosted translation
+# fasttext-langdetect==1.0.5  # Fast, accurate language detection (no external dependencies)
+
+langdetect==1.0.9
+
+# Alternative: DeepL (optional paid backup)
+deepl==1.23.0  # Uncomment if using DeepL as fallback

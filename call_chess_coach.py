@@ -32652,9 +32652,11 @@ import aiosmtplib
 from email.mime.text import MIMEText
 
 
-from googletrans import Translator
-import langdetect
+
+
 from langdetect import detect
+from langdetect.lang_detect_exception import LangDetectException
+
 
 # Configure logging
 logging.basicConfig(
@@ -32737,14 +32739,16 @@ METRICS = {
 
 
 
-translator = Translator()
+# translator = Translator()
 
 # Language code mapping
 LANGUAGE_MAP = {
     'en': 'English',
     'hi': 'Hindi',
     'kn': 'Kannada',
-    'ml': 'Malayalam'
+    'ml': 'Malayalam',
+    'ta': 'Tamil',  # Added Tamil
+    'te': 'Telugu'  # Added Telugu
 }
 
 # Language detection keywords
@@ -32752,8 +32756,17 @@ LANGUAGE_SWITCH_KEYWORDS = {
     'hi': ['hindi', 'hindi mein', 'हिंदी', 'hindi me bolo', 'speak hindi'],
     'kn': ['kannada', 'kannada mein', 'ಕನ್ನಡ', 'kannada nalli', 'speak kannada'],
     'ml': ['malayalam', 'malayalam il', 'മലയാളം', 'malayalam parayamo', 'speak malayalam'],
+    'ta': ['tamil', 'tamil la', 'தமிழ்', 'tamil paesu', 'speak tamil'],
+    'te': ['telugu', 'telugu lo', 'తెలుగు', 'telugu cheppu', 'speak telugu'],
     'en': ['english', 'english mein', 'speak english', 'english please']
 }
+
+
+
+LIBRETRANSLATE_URL = os.getenv("LIBRETRANSLATE_URL", "http://libretranslate:5000")
+
+# Optional: DeepL Configuration (Fallback)
+DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", None)  # Set in .env for paid fallback
 
 # ============================================
 # DATABASE FUNCTIONS
@@ -32975,6 +32988,110 @@ async def update_scheduled_call(scheduled_id: int, status: str, call_sid: str = 
                 SET status = $1, updated_at = CURRENT_TIMESTAMP
                 WHERE id = $2
             """, status, scheduled_id)
+
+
+
+async def translate_text_libretranslate(text: str, target_lang: str, source_lang: str = 'en') -> str:
+    """
+    Translate text using LibreTranslate (self-hosted, FREE)
+    
+    Fallback chain:
+    1. LibreTranslate (primary)
+    2. DeepL (if API key set)
+    3. Return original text
+    """
+    if target_lang == source_lang or not text.strip():
+        return text
+    
+    try:
+        # Primary: LibreTranslate
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{LIBRETRANSLATE_URL}/translate",
+                json={
+                    "q": text,
+                    "source": source_lang,
+                    "target": target_lang,
+                    "format": "text"
+                }
+            )
+            response.raise_for_status()
+            result = response.json()
+            translated = result.get('translatedText', text)
+            
+            if translated and translated != text:
+                logger.debug(f"LibreTranslate: {text[:50]}... → {translated[:50]}...")
+                return translated
+            
+    except Exception as e:
+        logger.warning(f"LibreTranslate failed: {e}")
+        
+        # Fallback: DeepL (if configured)
+        if DEEPL_API_KEY:
+            try:
+                import deepl
+                translator = deepl.Translator(DEEPL_API_KEY)
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: translator.translate_text(
+                        text, 
+                        target_lang=target_lang.upper(),
+                        source_lang=source_lang.upper()
+                    )
+                )
+                logger.info(f"DeepL fallback used: {text[:50]}...")
+                return result.text
+            except Exception as deepl_error:
+                logger.error(f"DeepL fallback failed: {deepl_error}")
+    
+    # Ultimate fallback: return original
+    logger.warning(f"Translation failed, returning original: {text[:50]}...")
+    return text
+
+def detect_language_fasttext(text: str) -> str:
+    """
+    Detect language using langdetect (pure Python)
+    Fallback to Unicode script detection for Indic languages
+    """
+    if not text or len(text.strip()) < 3:
+        return 'en'
+    
+    try:
+        # Primary: langdetect
+        lang = detect(text)
+        
+        # Map langdetect codes to your system
+        lang_map = {
+            'hi': 'hi',
+            'kn': 'kn',
+            'ml': 'ml',
+            'ta': 'ta',
+            'te': 'te',
+            'en': 'en'
+        }
+        
+        if lang in lang_map:
+            logger.debug(f"langdetect: detected '{lang}'")
+            return lang_map[lang]
+            
+    except LangDetectException as e:
+        logger.debug(f"langdetect failed: {e}")
+    except Exception as e:
+        logger.debug(f"langdetect error: {e}")
+    
+    # Fallback: Unicode script detection (very reliable for Indic)
+    if re.search(r'[\u0900-\u097F]', text):  # Devanagari
+        return 'hi'
+    if re.search(r'[\u0C80-\u0CFF]', text):  # Kanoreseda
+        return 'kn'
+    if re.search(r'[\u0D00-\u0D7F]', text):  # Malayalam
+        return 'ml'
+    if re.search(r'[\u0B80-\u0BFF]', text):  # Tamil
+        return 'ta'
+    if re.search(r'[\u0C00-\u0C7F]', text):  # Telugu
+        return 'te'
+    
+    return 'en'
 
 # ============================================
 # AI PROCESSING FUNCTIONS
@@ -33376,7 +33493,7 @@ class ProductionLangchainAgent(LangchainAgent):
         self.conversation_id_cache = conversation_id
         self.no_input_count = 0
         self.last_response_time = time.time()
-        self.current_language = 'en'  # Default language
+        self.current_language = 'en'
         self.lead_id = None
     
     def detect_language_switch(self, user_input: str) -> Optional[str]:
@@ -33388,14 +33505,11 @@ class ProductionLangchainAgent(LangchainAgent):
             if any(keyword in user_lower for keyword in keywords):
                 return lang_code
         
-        # Try automatic detection for non-English input
-        try:
-            detected = langdetect.detect(user_input)
-            if detected in ['hi', 'kn', 'ml'] and detected != self.current_language:
-                logger.info(f"Auto-detected language switch to: {detected}")
-                return detected
-        except Exception as e:
-            logger.debug(f"Language detection failed: {e}")
+        # Automatic detection using FastText
+        detected = detect_language_fasttext(user_input)
+        if detected != self.current_language and detected in LANGUAGE_MAP:
+            logger.info(f"Auto-detected language switch: {self.current_language} → {detected}")
+            return detected
         
         return None
     
@@ -33404,31 +33518,14 @@ class ProductionLangchainAgent(LangchainAgent):
         if target_lang == 'en' or not text:
             return text
         
-        try:
-            # Translate using Google Translate
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: translator.translate(text, dest=target_lang, src='en')
-            )
-            return result.text
-        except Exception as e:
-            logger.error(f"Translation failed: {e}")
-            return text  # Return original if translation fails
+        return await translate_text_libretranslate(text, target_lang, 'en')
     
     async def translate_to_english(self, text: str, source_lang: str) -> str:
         """Translate non-English input to English for processing"""
         if source_lang == 'en' or not text:
             return text
         
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: translator.translate(text, dest='en', src=source_lang)
-            )
-            return result.text
-        except Exception as e:
-            logger.error(f"Translation to English failed: {e}")
-            return text
+        return await translate_text_libretranslate(text, 'en', source_lang)
     
     async def update_lead_language_preference(self, lang_code: str):
         """Update lead's language preference in database"""
@@ -33436,7 +33533,7 @@ class ProductionLangchainAgent(LangchainAgent):
             try:
                 async with db_pool.acquire() as conn:
                     await conn.execute(
-                        "UPDATE leads SET preferred_language = $1 WHERE id = $2",
+                        "UPDATE leads SET preferred_language = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
                         lang_code, self.lead_id
                     )
                     logger.info(f"Updated lead {self.lead_id} language preference to {lang_code}")

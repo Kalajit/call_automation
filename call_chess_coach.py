@@ -32657,6 +32657,8 @@ from email.mime.text import MIMEText
 from langdetect import detect
 from langdetect.lang_detect_exception import LangDetectException
 
+import websockets  
+
 
 # Configure logging
 logging.basicConfig(
@@ -33214,6 +33216,129 @@ async def route_based_on_sentiment(sentiment: Dict, lead_id: int) -> str:
     
     return team
 
+
+
+
+async def check_call_transfer_criteria(sentiment: Dict, summary: Dict, lead_id: int, call_sid: str) -> bool:
+    """
+    Check if call should be transferred to human
+    
+    Criteria:
+    - Angry customer (sentiment score < 3)
+    - High value lead (intent = interested + tone_score >= 8)
+    - Confused customer (asks for human 2+ times)
+    - Customer explicitly requests human
+    """
+    should_transfer = False
+    trigger_reason = None
+    priority = 'medium'
+    
+    sentiment_type = sentiment.get('sentiment', 'neutral')
+    tone_score = sentiment.get('tone_score', 5)
+    intent = summary.get('intent', 'unknown')
+    
+    # 1. Angry customer
+    if sentiment_type == 'angry' or tone_score <= 3:
+        should_transfer = True
+        trigger_reason = 'angry_customer'
+        priority = 'urgent'
+    
+    # 2. High value lead
+    elif intent == 'interested' and tone_score >= 8:
+        should_transfer = True
+        trigger_reason = 'high_value'
+        priority = 'high'
+    
+    # 3. Confused customer (check conversation history)
+    elif sentiment_type == 'confused':
+        if call_sid in CONVERSATION_STORE:
+            context = CONVERSATION_STORE[call_sid].get('conversation_context', '')
+            if context.lower().count('human') >= 2 or context.lower().count('manager') >= 1:
+                should_transfer = True
+                trigger_reason = 'confused'
+                priority = 'high'
+    
+    # 4. Explicit request for human
+    if call_sid in CONVERSATION_STORE:
+        context = CONVERSATION_STORE[call_sid].get('conversation_context', '')
+        human_keywords = ['speak to human', 'talk to person', 'real person', 'manager', 'supervisor']
+        if any(keyword in context.lower() for keyword in human_keywords):
+            should_transfer = True
+            trigger_reason = 'manual_request'
+            priority = 'high'
+    
+    if should_transfer:
+        logger.info(f"🚨 Call transfer criteria met: {trigger_reason} (priority: {priority})")
+        
+        # Create takeover request via API
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{CRM_API_URL}/takeover/request",
+                    json={
+                        "lead_id": lead_id,
+                        "call_sid": call_sid,
+                        "request_type": "call_transfer",
+                        "trigger_reason": trigger_reason,
+                        "ai_sentiment": sentiment,
+                        "ai_summary": summary.get('summary'),
+                        "conversation_context": CONVERSATION_STORE.get(call_sid, {}).get('conversation_context', ''),
+                        "priority": priority
+                    },
+                    headers={"Authorization": f"Bearer {CRM_API_KEY}"}
+                )
+                response.raise_for_status()
+                result = response.json()
+                
+                if result.get('success') and result.get('agent'):
+                    agent = result['agent']
+                    logger.info(f"✅ Call transfer request created, assigned to {agent['name']}")
+                    
+                    # Transfer call to agent's number
+                    await transfer_call_to_human(call_sid, agent['phone'], agent['name'])
+                    return True
+                else:
+                    logger.warning("⚠️ No agent available for call transfer")
+                    return False
+                
+        except Exception as e:
+            logger.error(f"Failed to create call transfer request: {e}")
+            METRICS["errors"]["call_transfer_failed"] += 1
+            return False
+    
+    return False
+
+async def transfer_call_to_human(call_sid: str, agent_phone: str, agent_name: str):
+    """Transfer Twilio call to human agent"""
+    try:
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        
+        # Update call with <Dial>
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: client.calls(call_sid).update(
+                twiml=f'''
+                <Response>
+                    <Say voice="Polly.Raveena">
+                        Please hold while I connect you to {agent_name}.
+                    </Say>
+                    <Dial timeout="30" action="{BASE_URL}/dial_status">
+                        <Number>{agent_phone}</Number>
+                    </Dial>
+                </Response>
+                '''
+            )
+        )
+        
+        logger.info(f"📞 Call {call_sid} transferred to {agent_name} ({agent_phone})")
+        METRICS["routing_decisions"]["call_transferred"] += 1
+        
+    except Exception as e:
+        logger.error(f"Call transfer failed: {e}")
+        METRICS["errors"]["call_transfer_execution"] += 1
+
+
+
 # ============================================
 # NOTIFICATION FUNCTIONS
 # ============================================
@@ -33282,12 +33407,90 @@ class ProductionEventsManager(events_manager.EventsManager):
     """Enhanced events manager with full Module 1 features"""
     
     def __init__(self):
-        super().__init__(subscriptions=[EventType.TRANSCRIPT_COMPLETE])
+        super().__init__(subscriptions=[EventType.TURN_COMPLETE,EventType.TRANSCRIPT_COMPLETE])
     
     async def handle_event(self, event: Event):
-        if event.type == EventType.TRANSCRIPT_COMPLETE:
+        if event.type == EventType.TURN_COMPLETE:
+            await self._handle_turn_complete(event)
+        elif event.type == EventType.TRANSCRIPT_COMPLETE:
             await self._handle_transcript_complete(event)
     
+
+    #============================================
+    # NEW: LIVE PER-TURN HANDLER
+    # ============================================
+    async def _handle_turn_complete(self, event):
+        """Process each conversational turn for LIVE updates"""
+        call_sid = event.conversation_id
+        
+        try:
+            if call_sid not in CONVERSATION_STORE:
+                logger.warning(f"No conversation data for {call_sid}")
+                return
+            
+            conv_data = CONVERSATION_STORE[call_sid]
+            
+            # Build running transcript from turns so far
+            turns_so_far = conv_data.get('turns', [])
+            
+            # Append current turn
+            new_turn = {
+                "speaker": "human" if event.sender == "human" else "bot",
+                "text": event.text,
+                "timestamp": int(time.time() * 1000)
+            }
+            turns_so_far.append(new_turn)
+            conv_data['turns'] = turns_so_far
+            
+            # Only analyze when HUMAN speaks (skip bot turns)
+            if event.sender != "human":
+                return
+            
+            # Build transcript text
+            transcript_text = self._build_transcript(turns_so_far)
+            
+            # Run LIVE sentiment + summary analysis
+            sentiment = await analyze_sentiment(transcript_text)
+            summary = await generate_summary(transcript_text)
+            
+            logger.info(f"🔴 LIVE Update: {call_sid} | Sentiment: {sentiment['sentiment']} | Intent: {summary['intent']}")
+            
+            # Save lightweight DB update with in-progress status
+            await save_call_log(
+                call_sid=call_sid,
+                company_id=conv_data.get("company_id"),
+                lead_id=conv_data.get("lead_id"),
+                to_phone=conv_data.get("to_phone"),
+                from_phone=conv_data.get("from_phone"),
+                call_type=conv_data.get("call_type", "qualification"),
+                call_status="in-progress",  # KEY: Mark as in-progress
+                transcript=transcript_text,
+                sentiment=sentiment,
+                summary=summary,
+                conversation_history=turns_so_far
+            )
+            
+            # Broadcast LIVE update to WebSocket clients
+            await self._broadcast_live_update(
+                call_sid=call_sid,
+                lead_id=conv_data.get("lead_id"),
+                sentiment=sentiment,
+                summary=summary,
+                transcript=transcript_text,
+                turn_count=len(turns_so_far)
+            )
+            
+            # Check if human takeover needed (based on live sentiment)
+            if conv_data.get("lead_id"):
+                await check_call_transfer_criteria(
+                    sentiment, summary, conv_data["lead_id"], call_sid
+                )
+            
+        except Exception as e:
+            logger.error(f"❌ Error in live turn handler for {call_sid}: {e}", exc_info=True)
+
+
+
     async def _handle_transcript_complete(self, event: TranscriptCompleteEvent):
         """Process completed call transcript with ALL features"""
         call_sid = event.conversation_id
@@ -33300,6 +33503,20 @@ class ProductionEventsManager(events_manager.EventsManager):
             
             conv_data = CONVERSATION_STORE[call_sid]
             transcript_text = event.transcript.to_string()
+
+            # Use accumulated turns or rebuild from event
+            turns = conv_data.get('turns', [])
+            if not turns:
+                turns = [
+                    {
+                        "speaker": turn.speaker,
+                        "text": turn.text,
+                        "timestamp": turn.timestamp or int(time.time() * 1000)
+                    }
+                    for turn in event.transcript.turns
+                ]
+            
+            transcript_text = self._build_transcript(turns)
             
             logger.info(f"📝 Processing transcript for {call_sid}")
             
@@ -33361,6 +33578,23 @@ class ProductionEventsManager(events_manager.EventsManager):
                     )
             except Exception as e:
                 logger.debug(f"Could not fetch call duration: {e}")
+
+
+            # === NEW: Check if call should be transferred to human (BEFORE DB SAVE) ===
+            transfer_initiated = False
+            if lead_id:
+                try:
+                    transfer_initiated = await check_call_transfer_criteria(
+                        sentiment, summary, lead_id, call_sid
+                    )
+                    if transfer_initiated:
+                        summary["transferred_to_human"] = True
+                        summary["routed_to"] = "human_agent"
+                        logger.info(f"Call {call_sid} flagged for transfer to human agent")
+                except Exception as e:
+                    logger.error(f"Error checking transfer criteria: {e}")
+
+            
             
             # 7. Save to Database (Module 1 Req)
             await save_call_log(
@@ -33420,6 +33654,20 @@ Recording: {recording_url or 'Processing...'}
                     "recording_url": recording_url,
                     "duration": call_duration
                 })
+
+            # Broadcast FINAL update to WebSocket
+            await self._broadcast_live_update(
+                call_sid=call_sid,
+                lead_id=conv_data.get("lead_id"),
+                sentiment=sentiment,
+                summary=summary,
+                transcript=transcript_text,
+                turn_count=len(turns),
+                call_status="completed",
+                call_duration=call_duration,
+                recording_url=recording_url
+            )
+
             
             # 11. Update Metrics
             call_type = conv_data.get("call_type", "unknown")
@@ -33433,6 +33681,59 @@ Recording: {recording_url or 'Processing...'}
         except Exception as e:
             logger.error(f"❌ Error processing transcript for {call_sid}: {e}", exc_info=True)
             METRICS["errors"]["transcript_processing"] += 1
+
+    # ============================================
+    # HELPER METHODS
+    # ============================================
+    
+    def _build_transcript(self, turns: List[Dict]) -> str:
+        """Build readable transcript from turns"""
+        lines = []
+        for turn in turns:
+            speaker = turn['speaker'].upper()
+            text = turn['text']
+            lines.append(f"{speaker}: {text}")
+        return "\n".join(lines)
+    
+    async def _broadcast_live_update(
+        self, 
+        call_sid: str, 
+        lead_id: int,
+        sentiment: Dict,
+        summary: Dict,
+        transcript: str,
+        turn_count: int,
+        call_status: str = "in-progress",
+        call_duration: int = None,
+        recording_url: str = None
+    ):
+        """Broadcast live update to Node.js WebSocket server"""
+        try:
+            payload = {
+                "call_sid": call_sid,
+                "lead_id": lead_id,
+                "sentiment": sentiment,
+                "summary": summary,
+                "transcript": transcript,
+                "turn_count": turn_count,
+                "call_status": call_status,
+                "call_duration": call_duration,
+                "recording_url": recording_url,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.post(
+                    f"{CRM_API_URL}/live-update",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {CRM_API_KEY}"}
+                )
+                response.raise_for_status()
+                logger.debug(f"✅ Live update broadcast for {call_sid}")
+                
+        except Exception as e:
+            logger.warning(f"Failed to broadcast live update: {e}")
+            # Don't fail the call if broadcast fails
     
     async def _cleanup_conversation(self, call_sid: str):
         """Clean up conversation data after 5 minutes"""
@@ -34226,6 +34527,40 @@ async def get_agent_configs(company_id: int):
     except Exception as e:
         logger.error(f"Get agent configs failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+@app.post("/dial_status")
+async def dial_status_callback(request: Request):
+    """Handle Twilio Dial status (after transfer)"""
+    try:
+        form_data = await request.form()
+        call_sid = form_data.get("CallSid")
+        dial_status = form_data.get("DialCallStatus")
+        
+        logger.info(f"Dial status: {call_sid} -> {dial_status}")
+        
+        if dial_status == "completed":
+            # Human answered
+            logger.info(f"✅ Call transferred successfully: {call_sid}")
+        elif dial_status in ["busy", "no-answer", "failed"]:
+            # Human didn't answer - fallback to voicemail
+            logger.warning(f"⚠️ Transfer failed ({dial_status}), sending to voicemail")
+            
+            # Send WhatsApp fallback
+            if call_sid in CONVERSATION_STORE:
+                conv = CONVERSATION_STORE[call_sid]
+                await send_whatsapp_summary(
+                    conv.get("to_phone"),
+                    f"We tried to connect you with our team but couldn't reach them. We'll call you back within 30 minutes!"
+                )
+        
+        return {"ok": True}
+        
+    except Exception as e:
+        logger.error(f"Dial status error: {e}")
+        return {"ok": False}
 
 # ============================================
 # VOCODE INTEGRATION

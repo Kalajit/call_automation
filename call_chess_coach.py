@@ -32683,7 +32683,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 
 # Database Config
-DB_HOST = os.getenv("DB_HOST", "host.docker.internal")
+DB_HOST = os.getenv("DB_HOST", "postgres")
 DB_PORT = int(os.getenv("DB_PORT", 5432))
 DB_NAME = os.getenv("DB_NAME", "whatsapp_crm")
 DB_USER = os.getenv("DB_USER")

@@ -33407,19 +33407,19 @@ class ProductionEventsManager(events_manager.EventsManager):
     """Enhanced events manager with full Module 1 features"""
     
     def __init__(self):
-        super().__init__(subscriptions=[EventType.TURN_COMPLETE,EventType.TRANSCRIPT_COMPLETE])
+        super().__init__(subscriptions=[EventType.TRANSCRIPT,EventType.TRANSCRIPT_COMPLETE])
     
     async def handle_event(self, event: Event):
-        if event.type == EventType.TURN_COMPLETE:
-            await self._handle_turn_complete(event)
+        if event.type == EventType.TRANSCRIPT:
+            await self._handle_transcript_update(event)  # Live updates
         elif event.type == EventType.TRANSCRIPT_COMPLETE:
-            await self._handle_transcript_complete(event)
+            await self._handle_transcript_complete(event)  # Final updates
     
 
     #============================================
     # NEW: LIVE PER-TURN HANDLER
     # ============================================
-    async def _handle_turn_complete(self, event):
+    async def _handle_transcript_update(self, event):
         """Process each conversational turn for LIVE updates"""
         call_sid = event.conversation_id
         
@@ -33430,20 +33430,26 @@ class ProductionEventsManager(events_manager.EventsManager):
             
             conv_data = CONVERSATION_STORE[call_sid]
             
-            # Build running transcript from turns so far
-            turns_so_far = conv_data.get('turns', [])
+            # Check if this is a TranscriptEvent (has transcript attribute)
+            if not hasattr(event, 'transcript'):
+                logger.debug(f"Event has no transcript attribute, skipping")
+                return
             
-            # Append current turn
-            new_turn = {
-                "speaker": "human" if event.sender == "human" else "bot",
-                "text": event.text,
-                "timestamp": int(time.time() * 1000)
-            }
-            turns_so_far.append(new_turn)
+            # Get all turns from the transcript
+            turns_so_far = []
+            for turn in event.transcript.turns:
+                turns_so_far.append({
+                    "speaker": "human" if turn.speaker == "human" else "bot",
+                    "text": turn.text,
+                    "timestamp": turn.timestamp or int(time.time() * 1000)
+                })
+            
+            # Store in conversation data
             conv_data['turns'] = turns_so_far
             
-            # Only analyze when HUMAN speaks (skip bot turns)
-            if event.sender != "human":
+            # Only analyze if there are human turns
+            human_turns = [t for t in turns_so_far if t['speaker'] == 'human']
+            if len(human_turns) == 0:
                 return
             
             # Build transcript text

@@ -32765,7 +32765,9 @@ LANGUAGE_SWITCH_KEYWORDS = {
 
 
 
-LIBRETRANSLATE_URL = os.getenv("LIBRETRANSLATE_URL", "http://libretranslate:5000")
+# LIBRETRANSLATE_URL = os.getenv("LIBRETRANSLATE_URL", "http://libretranslate:5000")
+
+INDICTRANS_URL = os.getenv("INDICTRANS_URL", "http://indictrans:5000")
 
 # Optional: DeepL Configuration (Fallback)
 DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", None)  # Set in .env for paid fallback
@@ -32993,7 +32995,7 @@ async def update_scheduled_call(scheduled_id: int, status: str, call_sid: str = 
 
 
 
-async def translate_text_libretranslate(text: str, target_lang: str, source_lang: str = 'en') -> str:
+async def translate_text_indictrans(text: str, target_lang: str, source_lang: str = 'en') -> str:
     """
     Translate text using LibreTranslate (self-hosted, FREE)
     
@@ -33007,9 +33009,9 @@ async def translate_text_libretranslate(text: str, target_lang: str, source_lang
     
     try:
         # Primary: LibreTranslate
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(
-                f"{LIBRETRANSLATE_URL}/translate",
+                f"{INDICTRANS_URL}/translate",
                 json={
                     "q": text,
                     "source": source_lang,
@@ -33029,7 +33031,7 @@ async def translate_text_libretranslate(text: str, target_lang: str, source_lang
         logger.warning(f"LibreTranslate failed: {e}")
         
         # Fallback: DeepL (if configured)
-        if DEEPL_API_KEY:
+        if DEEPL_API_KEY and target_lang not in ['hi', 'kn', 'ml', 'ta', 'te']:
             try:
                 import deepl
                 translator = deepl.Translator(DEEPL_API_KEY)
@@ -33825,14 +33827,14 @@ class ProductionLangchainAgent(LangchainAgent):
         if target_lang == 'en' or not text:
             return text
         
-        return await translate_text_libretranslate(text, target_lang, 'en')
+        return await translate_text_indictrans(text, target_lang, 'en')
     
     async def translate_to_english(self, text: str, source_lang: str) -> str:
         """Translate non-English input to English for processing"""
         if source_lang == 'en' or not text:
             return text
         
-        return await translate_text_libretranslate(text, 'en', source_lang)
+        return await translate_text_indictrans(text, 'en', source_lang)
     
     async def update_lead_language_preference(self, lang_code: str):
         """Update lead's language preference in database"""

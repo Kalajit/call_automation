@@ -2,14 +2,18 @@ FROM python:3.10-slim
 
 # System deps for IndicTransToolkit + torch CPU
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git curl build-essential \
-    && rm -rf /var/lib/apt/lists/*
+        git git-lfs curl wget unzip ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && git lfs install
 
 WORKDIR /app
 
 # Install Python deps (torch CPU is huge – keep it in the image)
 COPY requirements-translate.txt .
-RUN pip install --no-cache-dir -r requirements-translate.txt
+RUN pip install --no-cache-dir \
+    --timeout=600 \
+    --retries=10 \
+    -r requirements-translate.txt
 
 # Install CPU-only PyTorch from official index
 RUN pip install --no-cache-dir \

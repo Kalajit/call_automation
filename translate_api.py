@@ -86,9 +86,17 @@ import ctranslate2
 import sentencepiece as spm
 from indicnlp.normalize.indic_normalize import IndicNormalizerFactory
 from indicnlp.tokenize import indic_tokenize
+import os
+import zipfile
+from huggingface_hub import snapshot_download
+from dotenv import load_dotenv
+
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+load_dotenv()
 
 app = FastAPI(title='IndicTrans2 Translation API')
 
@@ -118,23 +126,33 @@ class TranslateResponse(BaseModel):
     translatedText: str
 
 def download_model():
-    import os
-    import urllib.request
-    import zipfile
-
-    if os.path.exists(MODEL_DIR):
+    model_dir = "models/indictrans2"
+    zip_path = f"{model_dir}/model.zip"
+    
+    if os.path.exists(model_dir):
+        print("Model already downloaded.")
         return
 
-    logger.info("Downloading IndicTrans2 model (~1.2 GB)...")
-    url = "https://huggingface.co/ai4bharat/indictrans2-indic-en-1B/resolve/main/model.zip"
-    zip_path = "/tmp/model.zip"
-    urllib.request.urlretrieve(url, zip_path)
+    os.makedirs(model_dir, exist_ok=True)
+    
+    print("Downloading IndicTrans2 via HuggingFace Hub (~1.2 GB)...")
+    snapshot_download(
+        repo_id="ai4bharat/indictrans2-indic-en-1B",
+        local_dir=model_dir,
+        local_dir_use_symlinks=False,
+        token=os.getenv("HF_TOKEN"),
+        tqdm_class=None  # silence progress bar if you want
+    )
+    
+    # OPTIONAL: zip it if you really need model.zip
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
+        for root, _, files in os.walk(model_dir):
+            for f in files:
+                if f != "model.zip":
+                    z.write(os.path.join(root, f), os.path.relpath(os.path.join(root, f), model_dir))
+    print("Model ready!")
 
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(MODEL_DIR)
-    os.remove(zip_path)
-    logger.info("Model downloaded and extracted.")
+    
 
 def initialize():
     global translator, sp_processor, normalizers

@@ -40,3 +40,10 @@ aiosmtplib
 deepl==1.23.0  # Uncomment if using DeepL as fallback
 
 
+
+
+
+requests>=2.32.4
+pandas==2.1.4
+plotly==5.18.0
+python-dateutil==2.8.2

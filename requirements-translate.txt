@@ -8,3 +8,7 @@ sentencepiece
 sacremoses
 indic-nlp-library
 CTranslate2
+
+huggingface-hub
+tqdm
+python-dotenv

@@ -6861,6 +6861,18 @@ def python_api_post(endpoint: str, data: Dict, timeout: int = 30) -> Optional[Di
     except Exception as e:
         st.error(f"Python API Error: {str(e)}")
         return None
+    
+
+
+def api_delete(endpoint: str, timeout: int = 10) -> Optional[Dict]:
+    """DELETE request to API"""
+    try:
+        response = requests.delete(f"{API_BASE_URL}/{endpoint}", timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"API Error: {str(e)}")
+        return None
 
 # ==================== SIDEBAR NAVIGATION ====================
 def render_sidebar():
@@ -7576,12 +7588,704 @@ def render_lead_edit(lead):
             else:
                 st.error("Failed to update lead")
 
+
+
+def render_whatsapp_oauth_setup(agent):
+    """
+    Render WhatsApp OAuth setup UI for an agent instance
+    FIXED VERSION with proper error handling and status display
+    """
+    st.divider()
+    st.markdown("### 🔧 WhatsApp Business Setup")
+    
+    # Check connection status with proper error handling
+    try:
+        status_resp = api_get(f"whatsapp/oauth/status/{agent['id']}")
+        
+        if not status_resp or not status_resp.get('success'):
+            st.error("❌ Failed to check WhatsApp connection status")
+            return
+        
+        status_data = status_resp.get('data', {})
+        is_connected = status_data.get('is_connected', False)
+        
+        if is_connected:
+            # ==================== CONNECTED STATE ====================
+            st.success("✅ WhatsApp Business Connected!")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                phone = status_data.get('whatsapp_number', 'N/A')
+                st.metric("📱 Phone Number", phone)
+            
+            with col2:
+                days_left = status_data.get('days_until_expiry')
+                if days_left is not None:
+                    if days_left < 7:
+                        st.metric("⚠️ Token Expires", f"{days_left} days", delta_color="inverse")
+                    elif days_left < 30:
+                        st.metric("🔑 Token Valid", f"{days_left} days")
+                    else:
+                        st.metric("🔑 Token Valid", f"{days_left} days", delta_color="normal")
+                else:
+                    st.metric("🔑 Token Status", "Unknown")
+            
+            with col3:
+                needs_renewal = status_data.get('needs_renewal', False)
+                if needs_renewal:
+                    st.warning("⚠️ Renewal Needed")
+                else:
+                    st.success("✅ Healthy")
+            
+            # Webhook Configuration
+            st.markdown("#### 🌐 Webhook Configuration")
+            webhook_url = f"{API_BASE_URL.replace('/api', '')}/api/webhooks/whatsapp-universal"
+            
+            st.info("📌 **Webhook URL** (Use this in Meta Developer Console)")
+            st.code(webhook_url, language="text")
+            
+            # Action buttons
+            col_btn1, col_btn2 = st.columns(2)
+            
+            with col_btn1:
+                if st.button("🔄 Reconnect WhatsApp", 
+                           key=f"reconnect_{agent['id']}",
+                           help="Refresh connection if token expired"):
+                    with st.spinner("Initiating OAuth flow..."):
+                        oauth_resp = api_get(
+                            f"whatsapp/oauth/start?company_id={st.session_state.company_id}&agent_instance_id={agent['id']}"
+                        )
+                        
+                        if oauth_resp and oauth_resp.get('success'):
+                            auth_url = oauth_resp['data']['auth_url']
+                            st.success("✅ OAuth flow ready!")
+                            st.markdown(f"""
+                            <div style="background: #d4edda; padding: 20px; border-radius: 10px; margin: 10px 0;">
+                                <h4 style="color: #155724;">🔗 Click to Reconnect</h4>
+                                <a href="{auth_url}" target="_blank" style="
+                                    background: #28a745; 
+                                    color: white; 
+                                    padding: 12px 24px; 
+                                    border-radius: 5px; 
+                                    text-decoration: none; 
+                                    display: inline-block;
+                                    font-weight: bold;
+                                ">
+                                    Open Facebook Authorization
+                                </a>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        else:
+                            st.error("❌ Failed to start OAuth flow")
+            
+            with col_btn2:
+                if st.button("❌ Disconnect", 
+                           key=f"disconnect_{agent['id']}",
+                           help="Remove WhatsApp connection"):
+                    st.warning("⚠️ This will disconnect your WhatsApp Business account")
+                    
+                    if st.checkbox(f"✓ I confirm disconnection", 
+                                 key=f"confirm_disconnect_{agent['id']}"):
+                        with st.spinner("Disconnecting..."):
+                            disconnect_resp = api_delete(f"whatsapp/oauth/disconnect/{agent['id']}")
+                            
+                            if disconnect_resp and disconnect_resp.get('success'):
+                                st.success("✅ WhatsApp disconnected successfully!")
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error("❌ Failed to disconnect")
+        
+        else:
+            # ==================== NOT CONNECTED STATE ====================
+            st.warning("⚠️ WhatsApp not connected")
+            
+            st.markdown("""
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                        color: white; padding: 30px; border-radius: 15px; margin: 20px 0;">
+                <h3 style="margin: 0 0 15px 0;">🚀 Connect Your WhatsApp Business</h3>
+                <p style="font-size: 16px; line-height: 1.6; margin: 0;">
+                    <strong>Easy 3-Step Process:</strong><br>
+                    1️⃣ Click "Connect WhatsApp" below<br>
+                    2️⃣ Login with your Facebook account<br>
+                    3️⃣ Approve the connection<br><br>
+                    <strong>That's it!</strong> No technical knowledge required.
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Main connect button
+            if st.button("🔗 Connect WhatsApp Business", 
+                        use_container_width=True, 
+                        type="primary",
+                        key=f"oauth_connect_{agent['id']}",
+                        help="Start secure OAuth flow"):
+                
+                with st.spinner("🔄 Initializing secure connection..."):
+                    oauth_resp = api_get(
+                        f"whatsapp/oauth/start?company_id={st.session_state.company_id}&agent_instance_id={agent['id']}"
+                    )
+                    
+                    if oauth_resp and oauth_resp.get('success'):
+                        auth_url = oauth_resp['data']['auth_url']
+                        
+                        st.markdown(f"""
+                        <div style="background: #e3f2fd; padding: 30px; border-radius: 15px; margin: 20px 0; text-align: center;">
+                            <h3 style="color: #1976d2; margin-bottom: 20px;">🔐 Secure Connection Ready</h3>
+                            <p style="color: #424242; margin-bottom: 25px; font-size: 16px;">
+                                Click the button below to connect your WhatsApp Business account via Facebook OAuth:
+                            </p>
+                            <a href="{auth_url}" target="_blank" style="
+                                background: linear-gradient(135deg, #25D366 0%, #128C7E 100%);
+                                color: white; 
+                                padding: 18px 40px; 
+                                border-radius: 10px; 
+                                text-decoration: none; 
+                                display: inline-block;
+                                font-weight: bold;
+                                font-size: 18px;
+                                box-shadow: 0 4px 15px rgba(37, 211, 102, 0.4);
+                                transition: transform 0.2s;
+                            "
+                            onmouseover="this.style.transform='translateY(-2px)'" 
+                            onmouseout="this.style.transform='translateY(0)'">
+                                🚀 Open Facebook Authorization
+                            </a>
+                            <p style="color: #666; margin-top: 20px; font-size: 14px;">
+                                You'll be redirected to Facebook for secure authentication.<br>
+                                After approval, you'll receive setup instructions.
+                            </p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # Show expiry info
+                        expires_in = oauth_resp['data'].get('expires_in', 3600)
+                        st.info(f"⏱️ This authorization link expires in {expires_in // 60} minutes")
+                        
+                    else:
+                        st.error("❌ Failed to initialize OAuth flow")
+                        st.error("**Possible causes:**")
+                        st.markdown("""
+                        - META_APP_ID or META_APP_SECRET not configured in environment
+                        - BASE_URL not set correctly
+                        - Meta Developer App not created
+                        """)
+                        
+                        # Show debug info
+                        with st.expander("🔍 Debug Information"):
+                            st.json({
+                                "company_id": st.session_state.company_id,
+                                "agent_instance_id": agent['id'],
+                                "api_response": oauth_resp
+                            })
+            
+            # Advanced manual setup (fallback)
+            st.divider()
+            with st.expander("🔧 Advanced: Manual Setup (Not Recommended)", expanded=False):
+                st.warning("⚠️ **Warning:** Manual setup is complex and error-prone. OAuth method above is highly recommended.")
+                
+                st.markdown("""
+                **Manual setup requires:**
+                - Access to Meta Developer Console
+                - Understanding of WhatsApp Business API
+                - Manual token management
+                
+                **Use this only if OAuth fails.**
+                """)
+                
+                with st.form(f"manual_whatsapp_{agent['id']}"):
+                    st.markdown("**Meta WhatsApp Business API Credentials:**")
+                    
+                    col_m1, col_m2 = st.columns(2)
+                    
+                    with col_m1:
+                        access_token = st.text_input(
+                            "Access Token*", 
+                            type="password",
+                            help="From Meta Developer Console → WhatsApp → API Setup"
+                        )
+                        phone_number_id = st.text_input(
+                            "Phone Number ID*",
+                            help="Found in WhatsApp → Configuration"
+                        )
+                    
+                    with col_m2:
+                        business_account_id = st.text_input(
+                            "Business Account ID",
+                            help="Optional: Your WhatsApp Business Account ID"
+                        )
+                    
+                    st.info("💡 **Tip:** Get these from Meta Developer Console → Your App → WhatsApp → API Setup")
+                    
+                    submitted = st.form_submit_button("💾 Save Manual Credentials", use_container_width=True)
+                    
+                    if submitted:
+                        if not access_token or not phone_number_id:
+                            st.error("❌ Access Token and Phone Number ID are required")
+                        else:
+                            with st.spinner("Saving credentials..."):
+                                creds_data = {
+                                    "access_token": access_token,
+                                    "phone_number_id": phone_number_id,
+                                    "business_account_id": business_account_id if business_account_id else None
+                                }
+                                
+                                result = api_post(
+                                    f"agent-instances/{agent['id']}/whatsapp-credentials", 
+                                    creds_data
+                                )
+                                
+                                if result and result.get('success'):
+                                    st.success("✅ Manual credentials saved successfully!")
+                                    
+                                    st.markdown("### 📋 Next Steps:")
+                                    st.info(f"**Webhook URL:** {result.get('webhook_url')}")
+                                    st.code(result.get('webhook_url'), language="text")
+                                    
+                                    st.info(f"**Verify Token:** {result.get('verify_token')}")
+                                    st.code(result.get('verify_token'), language="text")
+                                    
+                                    st.markdown("""
+                                    **Register these in Meta Developer Console:**
+                                    1. Go to your app → WhatsApp → Configuration
+                                    2. Paste Webhook URL
+                                    3. Paste Verify Token
+                                    4. Click "Verify and Save"
+                                    5. Subscribe to "messages" webhook field
+                                    """)
+                                    
+                                    time.sleep(2)
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Failed to save credentials")
+                                    if result:
+                                        st.error(f"Error: {result.get('error', 'Unknown error')}")
+    
+    except Exception as e:
+        st.error(f"❌ Error loading WhatsApp setup: {str(e)}")
+        st.exception(e)
+
+
+
+def render_twilio_oauth_setup(agent):
+    """
+    Render Twilio OAuth setup UI for voice agent instances
+    """
+    st.divider()
+    st.markdown("### 📞 Twilio Voice Setup")
+    
+    try:
+        status_resp = api_get(f"twilio/oauth/status/{agent['id']}")
+        
+        if not status_resp or not status_resp.get('success'):
+            st.error("❌ Failed to check Twilio connection status")
+            return
+        
+        status_data = status_resp.get('data', {})
+        is_connected = status_data.get('is_connected', False)
+        
+        if is_connected:
+            # ==================== CONNECTED STATE ====================
+            st.success("✅ Twilio Account Connected!")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                phone = status_data.get('phone_number', 'N/A')
+                st.metric("📱 Phone Number", phone)
+            
+            with col2:
+                days_left = status_data.get('days_until_expiry')
+                if days_left is not None:
+                    if days_left < 30:
+                        st.metric("⚠️ Token Expires", f"{days_left} days", delta_color="inverse")
+                    else:
+                        st.metric("🔑 Token Valid", f"{days_left} days", delta_color="normal")
+                else:
+                    st.metric("🔑 Token Status", "Active")
+            
+            with col3:
+                needs_renewal = status_data.get('needs_renewal', False)
+                if needs_renewal:
+                    st.warning("⚠️ Renewal Needed")
+                else:
+                    st.success("✅ Healthy")
+            
+            # Webhook Configuration
+            st.markdown("#### 🌐 Webhook Configuration")
+            webhook_url = f"{API_BASE_URL.replace('/api', '')}/twilio/voice-webhook"
+            
+            st.info("📌 **Voice Webhook URL** (Configure in Twilio Console)")
+            st.code(webhook_url, language="text")
+            
+            st.markdown("""
+            **Setup Instructions:**
+            1. Go to [Twilio Console → Phone Numbers](https://console.twilio.com/us1/develop/phone-numbers/manage/incoming)
+            2. Click on your phone number
+            3. Under **Voice & Fax** → Set:
+               - **A Call Comes In:** Webhook
+               - **URL:** (paste above webhook URL)
+               - **HTTP Method:** POST
+            4. Click **Save**
+            """)
+            
+            # Action buttons
+            col_btn1, col_btn2 = st.columns(2)
+            
+            with col_btn1:
+                if st.button("🔄 Reconnect Twilio", 
+                           key=f"reconnect_twilio_{agent['id']}",
+                           help="Refresh connection if expired"):
+                    with st.spinner("Initiating OAuth flow..."):
+                        oauth_resp = api_get(
+                            f"twilio/oauth/start?company_id={st.session_state.company_id}&agent_instance_id={agent['id']}"
+                        )
+                        
+                        if oauth_resp and oauth_resp.get('success'):
+                            auth_url = oauth_resp['data']['auth_url']
+                            st.success("✅ OAuth flow ready!")
+                            st.markdown(f"""
+                            <div style="background: #d4edda; padding: 20px; border-radius: 10px; margin: 10px 0;">
+                                <h4 style="color: #155724;">🔗 Click to Reconnect</h4>
+                                <a href="{auth_url}" target="_blank" style="
+                                    background: #28a745; 
+                                    color: white; 
+                                    padding: 12px 24px; 
+                                    border-radius: 5px; 
+                                    text-decoration: none; 
+                                    display: inline-block;
+                                    font-weight: bold;
+                                ">
+                                    Open Twilio Authorization
+                                </a>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        else:
+                            st.error("❌ Failed to start OAuth flow")
+            
+            with col_btn2:
+                if st.button("❌ Disconnect", 
+                           key=f"disconnect_twilio_{agent['id']}",
+                           help="Remove Twilio connection"):
+                    st.warning("⚠️ This will disconnect your Twilio account")
+                    
+                    if st.checkbox(f"✓ I confirm disconnection", 
+                                 key=f"confirm_disconnect_twilio_{agent['id']}"):
+                        with st.spinner("Disconnecting..."):
+                            disconnect_resp = api_delete(f"twilio/oauth/disconnect/{agent['id']}")
+                            
+                            if disconnect_resp and disconnect_resp.get('success'):
+                                st.success("✅ Twilio disconnected successfully!")
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error("❌ Failed to disconnect")
+        
+        else:
+            # ==================== NOT CONNECTED STATE ====================
+            st.warning("⚠️ Twilio not connected")
+            
+            st.markdown("""
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                        color: white; padding: 30px; border-radius: 15px; margin: 20px 0;">
+                <h3 style="margin: 0 0 15px 0;">🚀 Connect Your Twilio Account</h3>
+                <p style="font-size: 16px; line-height: 1.6; margin: 0;">
+                    <strong>Easy 3-Step Process:</strong><br>
+                    1️⃣ Click "Connect Twilio" below<br>
+                    2️⃣ Login to your Twilio account<br>
+                    3️⃣ Approve the connection<br><br>
+                    <strong>That's it!</strong> Your phone numbers will be auto-configured.
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Main connect button
+            if st.button("🔗 Connect Twilio Account", 
+                        use_container_width=True, 
+                        type="primary",
+                        key=f"oauth_connect_twilio_{agent['id']}",
+                        help="Start secure OAuth flow"):
+                
+                with st.spinner("🔄 Initializing secure connection..."):
+                    oauth_resp = api_get(
+                        f"twilio/oauth/start?company_id={st.session_state.company_id}&agent_instance_id={agent['id']}"
+                    )
+                    
+                    if oauth_resp and oauth_resp.get('success'):
+                        auth_url = oauth_resp['data']['auth_url']
+                        
+                        st.markdown(f"""
+                        <div style="background: #e3f2fd; padding: 30px; border-radius: 15px; margin: 20px 0; text-align: center;">
+                            <h3 style="color: #1976d2; margin-bottom: 20px;">🔐 Secure Connection Ready</h3>
+                            <p style="color: #424242; margin-bottom: 25px; font-size: 16px;">
+                                Click the button below to connect your Twilio account via OAuth:
+                            </p>
+                            <a href="{auth_url}" target="_blank" style="
+                                background: linear-gradient(135deg, #F22F46 0%, #E01B33 100%);
+                                color: white; 
+                                padding: 18px 40px; 
+                                border-radius: 10px; 
+                                text-decoration: none; 
+                                display: inline-block;
+                                font-weight: bold;
+                                font-size: 18px;
+                                box-shadow: 0 4px 15px rgba(242, 47, 70, 0.4);
+                                transition: transform 0.2s;
+                            "
+                            onmouseover="this.style.transform='translateY(-2px)'" 
+                            onmouseout="this.style.transform='translateY(0)'">
+                                🚀 Open Twilio Authorization
+                            </a>
+                            <p style="color: #666; margin-top: 20px; font-size: 14px;">
+                                You'll be redirected to Twilio for secure authentication.<br>
+                                After approval, your phone numbers will be auto-configured.
+                            </p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        expires_in = oauth_resp['data'].get('expires_in', 600)
+                        st.info(f"⏱️ This authorization link expires in {expires_in // 60} minutes")
+                        
+                    else:
+                        st.error("❌ Failed to initialize OAuth flow")
+                        st.error("**Possible causes:**")
+                        st.markdown("""
+                        - TWILIO_APP_SID or TWILIO_APP_SECRET not configured in environment
+                        - BASE_URL not set correctly
+                        - Twilio OAuth app not created
+                        """)
+                        
+                        with st.expander("🔍 Debug Information"):
+                            st.json({
+                                "company_id": st.session_state.company_id,
+                                "agent_instance_id": agent['id'],
+                                "api_response": oauth_resp
+                            })
+    
+    except Exception as e:
+        st.error(f"❌ Error loading Twilio setup: {str(e)}")
+        st.exception(e)
+
+
+
+
+def render_airtel_sip_setup(agent):
+    """
+    Render Airtel SIP configuration UI
+    """
+    st.divider()
+    st.markdown("### 📡 Airtel SIP Configuration")
+    
+    try:
+        status_resp = api_get(f"sip/status/{agent['id']}")
+        
+        if not status_resp or not status_resp.get('success'):
+            st.error("❌ Failed to check SIP status")
+            return
+        
+        status_data = status_resp.get('data', {})
+        is_configured = status_data.get('is_configured', False)
+        provider = status_data.get('provider', 'none')
+        
+        if is_configured and provider in ['airtel', 'custom']:
+            # ==================== CONFIGURED STATE ====================
+            st.success(f"✅ {provider.upper()} SIP Configured!")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                phone = status_data.get('phone_number', 'N/A')
+                st.metric("📱 DID Number", phone)
+            
+            with col2:
+                st.metric("🌐 Provider", provider.upper())
+            
+            st.info("💡 **Note:** SIP calls are routed through Twilio's SIP infrastructure")
+            
+            # Update credentials
+            with st.expander("🔧 Update SIP Credentials"):
+                with st.form(f"update_sip_{agent['id']}"):
+                    st.markdown("**Update Airtel SIP Details:**")
+                    
+                    sip_domain = st.text_input("SIP Domain*", placeholder="sip.airtel.in")
+                    sip_username = st.text_input("SIP Username*", placeholder="your_username")
+                    sip_password = st.text_input("SIP Password*", type="password")
+                    did_number = st.text_input("DID Number*", placeholder="+911234567890")
+                    
+                    if st.form_submit_button("Update SIP Credentials"):
+                        if not all([sip_domain, sip_username, sip_password, did_number]):
+                            st.error("All fields are required!")
+                        else:
+                            result = api_post("airtel-sip/configure", {
+                                "agent_instance_id": agent['id'],
+                                "sip_domain": sip_domain,
+                                "sip_username": sip_username,
+                                "sip_password": sip_password,
+                                "did_number": did_number
+                            })
+                            
+                            if result and result.get('success'):
+                                st.success("✅ SIP credentials updated!")
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error("Failed to update credentials")
+        
+        else:
+            # ==================== NOT CONFIGURED STATE ====================
+            st.warning("⚠️ Airtel SIP not configured")
+            
+            st.markdown("""
+            <div style="background: #fff3cd; padding: 20px; border-radius: 10px; margin: 10px 0;">
+                <h4 style="color: #856404;">📋 Prerequisites:</h4>
+                <ul style="color: #856404;">
+                    <li>Active Airtel SIP trunk account</li>
+                    <li>DID number assigned by Airtel</li>
+                    <li>SIP credentials (domain, username, password)</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            with st.form(f"setup_sip_{agent['id']}"):
+                st.markdown("**Enter Airtel SIP Credentials:**")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    sip_domain = st.text_input("SIP Domain*", placeholder="sip.airtel.in", help="Provided by Airtel")
+                    sip_username = st.text_input("SIP Username*", placeholder="your_username")
+                
+                with col2:
+                    sip_password = st.text_input("SIP Password*", type="password")
+                    did_number = st.text_input("DID Number*", placeholder="+911234567890", help="Your Airtel DID number")
+                
+                st.info("💡 **Tip:** Get these credentials from your Airtel SIP account dashboard")
+                
+                submitted = st.form_submit_button("Configure Airtel SIP", use_container_width=True)
+                
+                if submitted:
+                    if not all([sip_domain, sip_username, sip_password, did_number]):
+                        st.error("All fields are required!")
+                    else:
+                        with st.spinner("Configuring SIP..."):
+                            result = api_post("airtel-sip/configure", {
+                                "agent_instance_id": agent['id'],
+                                "sip_domain": sip_domain,
+                                "sip_username": sip_username,
+                                "sip_password": sip_password,
+                                "did_number": did_number
+                            })
+                            
+                            if result and result.get('success'):
+                                st.success("✅ Airtel SIP configured successfully!")
+                                st.info(f"**Your DID Number:** {result.get('phone_number')}")
+                                time.sleep(2)
+                                st.rerun()
+                            else:
+                                st.error("Failed to configure SIP")
+                                if result:
+                                    st.error(f"Error: {result.get('error')}")
+    
+    except Exception as e:
+        st.error(f"❌ Error loading SIP setup: {str(e)}")
+        st.exception(e)
+
+
+
+
 # ==================== PAGE: AI AGENTS ====================
 def page_agents():
     st.title("🤖 AI Agent Management")
     
     tab1, tab2 = st.tabs(["My Agents", "Create New Agent"])
     
+    # with tab1:
+    #     agents_resp = api_get(f"agent-instances/company/{st.session_state.company_id}")
+        
+    #     if not agents_resp or not agents_resp.get('success'):
+    #         st.info("No agents configured yet")
+    #     else:
+    #         for agent in agents_resp['data']:
+    #             with st.expander(f"🤖 {agent['agent_name']} ({agent['agent_type']})"):
+    #                 col1, col2 = st.columns(2)
+                    
+    #                 with col1:
+    #                     st.write(f"**ID:** {agent['id']}")
+    #                     st.write(f"**Type:** {agent['agent_type']}")
+    #                     st.write(f"**Phone:** {agent.get('phone_number', 'N/A')}")
+    #                     st.write(f"**WhatsApp:** {agent.get('whatsapp_number', 'N/A')}")
+    #                     st.write(f"**Status:** {'🟢 Active' if agent['is_active'] else '🔴 Inactive'}")
+                    
+    #                 with col2:
+    #                     st.write(f"**Created:** {agent['created_at'][:10]}")
+    #                     st.write(f"**Voice:** {agent.get('custom_voice', agent.get('default_voice', 'N/A'))}")
+    #                     st.write(f"**Model:** {agent.get('model_name', 'N/A')}")
+                    
+    #                 # Agent performance stats
+    #                 stats_resp = api_get(f"agent-instances/{agent['id']}/stats")
+    #                 if stats_resp and stats_resp.get('success'):
+    #                     stats = stats_resp['data']
+    #                     st.markdown("### 📊 Performance (30 days)")
+    #                     col_s1, col_s2, col_s3 = st.columns(3)
+    #                     with col_s1:
+    #                         st.metric("Total Calls", stats.get('total_calls', 0))
+    #                     with col_s2:
+    #                         st.metric("Completed Calls", stats.get('completed_calls', 0))
+    #                     with col_s3:
+    #                         st.metric("Total Messages", stats.get('total_messages', 0))
+                    
+    #                 if agent.get('custom_prompt'):
+    #                     with st.expander("View Custom Prompt"):
+    #                         st.text_area("Prompt", value=agent['custom_prompt'], height=200, key=f"prompt_{agent['id']}")
+                    
+    #                 # WhatsApp Credentials Setup
+    #                 if agent['agent_type'] == 'whatsapp':
+    #                     st.divider()
+    #                     st.markdown("### 🔧 WhatsApp Setup")
+                        
+    #                     if agent.get('whatsapp_credentials'):
+    #                         st.success("✅ WhatsApp credentials configured")
+    #                         st.info(f"**Webhook URL:** {API_BASE_URL.replace('/api', '')}/api/webhooks/whatsapp-universal")
+    #                         if agent.get('webhook_verify_token'):
+    #                             st.info(f"**Verify Token:** {agent['webhook_verify_token']}")
+    #                     else:
+    #                         st.warning("⚠️ WhatsApp credentials not configured")
+                            
+    #                         with st.form(f"whatsapp_creds_{agent['id']}"):
+    #                             st.markdown("**Meta WhatsApp Business API Credentials:**")
+    #                             access_token = st.text_input("Access Token*", type="password")
+    #                             phone_number_id = st.text_input("Phone Number ID*")
+    #                             business_account_id = st.text_input("Business Account ID")
+                                
+    #                             if st.form_submit_button("Save Credentials"):
+    #                                 creds_data = {
+    #                                     "access_token": access_token,
+    #                                     "phone_number_id": phone_number_id,
+    #                                     "business_account_id": business_account_id
+    #                                 }
+                                    
+    #                                 result = api_post(f"agent-instances/{agent['id']}/whatsapp-credentials", creds_data)
+                                    
+    #                                 if result and result.get('success'):
+    #                                     st.success("✅ Credentials saved!")
+    #                                     st.info(f"**Webhook URL:** {result.get('webhook_url')}")
+    #                                     st.info(f"**Verify Token:** {result.get('verify_token')}")
+    #                                     st.rerun()
+    #                                 else:
+    #                                     st.error("Failed to save credentials")
+                    
+    #                 # Delete agent
+    #                 st.divider()
+    #                 if st.button(f"🗑️ Delete Agent", key=f"delete_{agent['id']}"):
+    #                     if st.checkbox(f"Confirm deletion of {agent['agent_name']}", key=f"confirm_{agent['id']}"):
+    #                         result = api_delete(f"agent-instances/{agent['id']}")
+    #                         if result and result.get('success'):
+    #                             st.success("Agent deleted!")
+    #                             st.rerun()
+
+
+
     with tab1:
         agents_resp = api_get(f"agent-instances/company/{st.session_state.company_id}")
         
@@ -7590,6 +8294,7 @@ def page_agents():
         else:
             for agent in agents_resp['data']:
                 with st.expander(f"🤖 {agent['agent_name']} ({agent['agent_type']})"):
+                    # Basic Info
                     col1, col2 = st.columns(2)
                     
                     with col1:
@@ -7604,7 +8309,27 @@ def page_agents():
                         st.write(f"**Voice:** {agent.get('custom_voice', agent.get('default_voice', 'N/A'))}")
                         st.write(f"**Model:** {agent.get('model_name', 'N/A')}")
                     
-                    # Agent performance stats
+                    # ✅ FIXED: WhatsApp Setup with proper OAuth
+                    if agent['agent_type'] == 'whatsapp':
+                        render_whatsapp_oauth_setup(agent)
+
+                    if agent['agent_type'] == 'voice':
+                        # Provider selection
+                        col_provider1, col_provider2 = st.columns(2)
+                        
+                        with col_provider1:
+                            provider_choice = st.radio(
+                                "Select Provider",
+                                ["Twilio OAuth", "Airtel SIP"],
+                                key=f"provider_{agent['id']}"
+                            )
+                        
+                        if provider_choice == "Twilio OAuth":
+                            render_twilio_oauth_setup(agent)
+                        else:
+                            render_airtel_sip_setup(agent)
+                    
+                    # Agent Performance Stats
                     stats_resp = api_get(f"agent-instances/{agent['id']}/stats")
                     if stats_resp and stats_resp.get('success'):
                         stats = stats_resp['data']
@@ -7617,54 +8342,25 @@ def page_agents():
                         with col_s3:
                             st.metric("Total Messages", stats.get('total_messages', 0))
                     
+                    # Custom Prompt
                     if agent.get('custom_prompt'):
                         with st.expander("View Custom Prompt"):
-                            st.text_area("Prompt", value=agent['custom_prompt'], height=200, key=f"prompt_{agent['id']}")
+                            st.text_area("Prompt", value=agent['custom_prompt'], 
+                                       height=200, key=f"prompt_{agent['id']}", disabled=True)
                     
-                    # WhatsApp Credentials Setup
-                    if agent['agent_type'] == 'whatsapp':
-                        st.divider()
-                        st.markdown("### 🔧 WhatsApp Setup")
-                        
-                        if agent.get('whatsapp_credentials'):
-                            st.success("✅ WhatsApp credentials configured")
-                            st.info(f"**Webhook URL:** {API_BASE_URL.replace('/api', '')}/api/webhooks/whatsapp-universal")
-                            if agent.get('webhook_verify_token'):
-                                st.info(f"**Verify Token:** {agent['webhook_verify_token']}")
-                        else:
-                            st.warning("⚠️ WhatsApp credentials not configured")
-                            
-                            with st.form(f"whatsapp_creds_{agent['id']}"):
-                                st.markdown("**Meta WhatsApp Business API Credentials:**")
-                                access_token = st.text_input("Access Token*", type="password")
-                                phone_number_id = st.text_input("Phone Number ID*")
-                                business_account_id = st.text_input("Business Account ID")
-                                
-                                if st.form_submit_button("Save Credentials"):
-                                    creds_data = {
-                                        "access_token": access_token,
-                                        "phone_number_id": phone_number_id,
-                                        "business_account_id": business_account_id
-                                    }
-                                    
-                                    result = api_post(f"agent-instances/{agent['id']}/whatsapp-credentials", creds_data)
-                                    
-                                    if result and result.get('success'):
-                                        st.success("✅ Credentials saved!")
-                                        st.info(f"**Webhook URL:** {result.get('webhook_url')}")
-                                        st.info(f"**Verify Token:** {result.get('verify_token')}")
-                                        st.rerun()
-                                    else:
-                                        st.error("Failed to save credentials")
-                    
-                    # Delete agent
+                    # Delete Agent
                     st.divider()
-                    if st.button(f"🗑️ Delete Agent", key=f"delete_{agent['id']}"):
-                        if st.checkbox(f"Confirm deletion of {agent['agent_name']}", key=f"confirm_{agent['id']}"):
-                            result = api_delete(f"agent-instances/{agent['id']}")
-                            if result and result.get('success'):
-                                st.success("Agent deleted!")
-                                st.rerun()
+                    if st.button(f"🗑️ Delete Agent", key=f"delete_{agent['id']}", type="secondary"):
+                        if st.checkbox(f"Confirm deletion of {agent['agent_name']}", 
+                                     key=f"confirm_{agent['id']}"):
+                            with st.spinner("Deleting..."):
+                                result = api_delete(f"agent-instances/{agent['id']}")
+                                if result and result.get('success'):
+                                    st.success("Agent deleted!")
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to delete agent")
     
     with tab2:
         st.subheader("Create New AI Agent")

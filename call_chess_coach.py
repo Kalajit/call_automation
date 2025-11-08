@@ -32840,6 +32840,7 @@ async def get_company_config(company_id: int, prompt_key: str = None, agent_inst
             "SELECT * FROM companies WHERE id = $1", company_id
         )
         if not company:
+            logger.error(f"❌ Company {company_id} not found")
             return None
         
         # Get agent instance if provided
@@ -32849,6 +32850,10 @@ async def get_company_config(company_id: int, prompt_key: str = None, agent_inst
                 "SELECT * FROM agent_instances WHERE id = $1 AND company_id = $2 AND is_active = TRUE",
                 agent_instance_id, company_id
             )
+
+            if not agent_instance:
+                logger.warning(f"⚠️ Agent instance {agent_instance_id} not found, using default config")
+        
         
         # Get agent config (use instance's config or default)
         config_id = agent_instance['agent_config_id'] if agent_instance else None
@@ -32869,16 +32874,17 @@ async def get_company_config(company_id: int, prompt_key: str = None, agent_inst
                 query += " AND prompt_key = $2"
                 params.append(prompt_key)
             else:
-                query += " LIMIT 1"
+                query += " ORDER BY created_at DESC LIMIT 1"
             
             agent_config = await conn.fetchrow(query, *params)
         
         if not agent_config:
+            logger.error(f"❌ No agent config found for company {company_id}")
             return None
         
         # Override with agent instance customizations
+        agent_dict = dict(agent_config)
         if agent_instance:
-            agent_dict = dict(agent_config)
             if agent_instance['custom_prompt']:
                 agent_dict['prompt_preamble'] = agent_instance['custom_prompt']
             if agent_instance['custom_voice']:
@@ -32887,8 +32893,6 @@ async def get_company_config(company_id: int, prompt_key: str = None, agent_inst
                 company_dict = dict(company)
                 company_dict['phone_number'] = agent_instance['phone_number']
                 company = company_dict
-        else:
-            agent_dict = dict(agent_config)
         
         return {
             "company": dict(company),
@@ -32941,6 +32945,58 @@ async def save_call_log(
             json.dumps(conversation_history) if conversation_history else None,
             recording_url, local_audio_path
         )
+
+
+async def handle_call_failure(
+    company_id: int,
+    lead_id: int,
+    to_phone: str,
+    from_phone: str,
+    call_type: str,
+    error_message: str
+):
+    """
+    ✅ NEW: Handle call initiation failures
+    """
+    try:
+        # Generate a pseudo call_sid for failed calls
+        failed_call_sid = f"FAILED_{int(time.time())}_{lead_id}"
+        
+        # Save failed call log
+        await save_call_log(
+            call_sid=failed_call_sid,
+            company_id=company_id,
+            lead_id=lead_id,
+            to_phone=to_phone,
+            from_phone=from_phone or "unknown",
+            call_type=call_type,
+            call_status="failed",
+            transcript=f"Call failed: {error_message}"
+        )
+        
+        # Update lead status
+        await update_lead_status(lead_id, "call_failed")
+        
+        # Create alert
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO alerts (alert_type, title, message, severity, lead_id)
+                VALUES ($1, $2, $3, $4, $5)
+            """, 
+            "call_failed",
+            f"Call Failed - Lead {lead_id}",
+            f"Failed to call {to_phone}: {error_message}",
+            "high",
+            lead_id)
+        
+        METRICS["calls_failed"][call_type] += 1
+        logger.error(f"❌ Call failure handled for lead {lead_id}: {error_message}")
+        
+    except Exception as e:
+        logger.error(f"Failed to handle call failure: {e}")
+
+
+
 
 async def update_lead_status(lead_id: int, status: str, last_contacted: datetime = None):
     """Update lead status after call"""
@@ -33629,7 +33685,6 @@ class ProductionEventsManager(events_manager.EventsManager):
             # 9. Send Notifications (Module 1 Req - Email & WhatsApp)
             if conv_data.get("email"):
                 email_body = f"""Call Summary
-
 Duration: {call_duration}s
 Sentiment: {sentiment['sentiment']} ({sentiment.get('tone_score')}/10)
 
@@ -33651,6 +33706,12 @@ Recording: {recording_url or 'Processing...'}
                 whatsapp_body = f"📞 Call Summary: {summary['summary'][:100]}... Next: {', '.join(summary.get('next_actions', [])[:2])}"
                 await send_whatsapp_summary(conv_data["to_phone"], whatsapp_body)
             
+            # ✅ NEW: Calculate duration if Twilio didn't provide it
+            if call_duration == 0:
+                call_duration = await self._calculate_call_duration(call_sid)
+                logger.info(f"📊 Calculated call duration: {call_duration}s")
+
+
             # 10. Update External CRM (Module 1 Req)
             if lead_id:
                 await update_crm(lead_id, {
@@ -33689,6 +33750,31 @@ Recording: {recording_url or 'Processing...'}
         except Exception as e:
             logger.error(f"❌ Error processing transcript for {call_sid}: {e}", exc_info=True)
             METRICS["errors"]["transcript_processing"] += 1
+
+
+
+    async def _calculate_call_duration(self, call_sid: str) -> int:
+        """
+        ✅ NEW: Calculate accurate call duration
+        """
+        try:
+            if call_sid not in CONVERSATION_STORE:
+                return 0
+            
+            conv_data = CONVERSATION_STORE[call_sid]
+            started_at = conv_data.get('started_at')
+            
+            if not started_at:
+                return 0
+            
+            start_time = datetime.fromisoformat(started_at)
+            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+            
+            return int(duration)
+            
+        except Exception as e:
+            logger.error(f"Failed to calculate duration: {e}")
+            return 0
 
     # ============================================
     # HELPER METHODS
@@ -33805,7 +33891,7 @@ class ProductionLangchainAgent(LangchainAgent):
         self.current_language = 'en'
         self.lead_id = None
     
-    def detect_language_switch(self, user_input: str) -> Optional[str]:
+    async def detect_language_switch(self, user_input: str) -> Optional[str]:
         """Detect if user wants to switch language"""
         user_lower = user_input.lower()
         
@@ -33818,6 +33904,7 @@ class ProductionLangchainAgent(LangchainAgent):
         detected = detect_language_fasttext(user_input)
         if detected != self.current_language and detected in LANGUAGE_MAP:
             logger.info(f"Auto-detected language switch: {self.current_language} → {detected}")
+            await self.save_language_to_db(detected) 
             return detected
         
         return None
@@ -33848,6 +33935,22 @@ class ProductionLangchainAgent(LangchainAgent):
                     logger.info(f"Updated lead {self.lead_id} language preference to {lang_code}")
             except Exception as e:
                 logger.error(f"Failed to update language preference: {e}")
+
+
+    async def save_language_to_db(self, lang_code: str):
+        """
+        ✅ NEW: Save detected language to conversation store
+        """
+        if not self.conversation_id_cache:
+            return
+        
+        try:
+            if self.conversation_id_cache in CONVERSATION_STORE:
+                CONVERSATION_STORE[self.conversation_id_cache]['language'] = lang_code
+                logger.info(f"💾 Saved language '{lang_code}' to conversation {self.conversation_id_cache}")
+        except Exception as e:
+            logger.error(f"Failed to save language: {e}")
+
     
     async def respond(self, human_input: str, conversation_id: str, is_interrupt: bool = False) -> Tuple[Optional[str], bool]:
         try:
@@ -34003,6 +34106,116 @@ class ProductionLangchainAgent(LangchainAgent):
 
 
 
+# async def make_outbound_call(
+#     company_id: int,
+#     lead_id: int,
+#     to_phone: str,
+#     name: str,
+#     call_type: str = "qualification",
+#     prompt_key: str = None,
+#     agent_instance_id: int = None  # NEW PARAMETER
+# ) -> str:
+#     """
+#     Make outbound call with full Module 1 features
+    
+#     Returns: call_sid
+#     """
+#     async with CALL_SEMAPHORE:
+#         try:
+#             # 1. Get company config with agent instance support
+#             config = await get_company_config(company_id, prompt_key, agent_instance_id)
+#             if not config:
+#                 raise ValueError(f"No config found for company {company_id}")
+            
+#             company = config["company"]
+#             agent_cfg = config["agent"]
+#             agent_instance = config.get("agent_instance")
+
+
+
+#             # ✅ NEW: Get agent-specific Twilio credentials
+#             if not agent_instance or not agent_instance.get('twilio_credentials'):
+#                 raise ValueError(f"Agent instance {agent_instance_id} has no Twilio credentials. Please connect Twilio account via OAuth.")
+            
+#             twilio_creds = agent_instance['twilio_credentials']
+#             account_sid = twilio_creds.get('account_sid')
+#             auth_token = twilio_creds.get('auth_token')
+#             from_phone = agent_instance.get('phone_number') or twilio_creds.get('phone_number')
+            
+#             if not account_sid or not auth_token or not from_phone:
+#                 raise ValueError("Invalid Twilio credentials in agent instance")
+            
+            
+#             # 2. Customize initial message
+#             initial_msg = agent_cfg["initial_message"].replace("{{name}}", name or "there")
+            
+#             # 3. Determine which phone number to use
+#             # from_phone = agent_instance['phone_number'] if agent_instance and agent_instance['phone_number'] else company["phone_number"]
+            
+#             # ✅ Use agent-specific Twilio client
+#             client = Client(account_sid, auth_token)
+            
+#             call = await asyncio.get_event_loop().run_in_executor(
+#                 None,
+#                 lambda: client.calls.create(
+#                     to=to_phone,
+#                     from_=from_phone,  # USE AGENT-SPECIFIC NUMBER
+#                     url=f"https://{BASE_URL}/inbound_call",
+#                     status_callback=f"https://{BASE_URL}/call_status",
+#                     status_callback_method="POST",
+#                     status_callback_event=["initiated", "ringing", "answered", "completed"],
+#                     record=True,
+#                     recording_channels="dual",
+#                     recording_status_callback=f"https://{BASE_URL}/recording_status",
+#                     recording_status_callback_method="POST"
+#                 )
+#             )
+            
+#             call_sid = call.sid
+            
+#             CONVERSATION_STORE[call_sid] = {
+#                 "call_sid": call_sid,
+#                 "company_id": company_id,
+#                 "lead_id": lead_id,
+#                 "to_phone": to_phone,
+#                 "from_phone": from_phone,
+#                 "name": name,
+#                 "call_type": call_type,
+#                 "prompt_key": prompt_key,
+#                 "agent_instance_id": agent_instance_id,  
+#                 "agent_name": agent_instance['agent_name'] if agent_instance else 'default',  
+#                 "started_at": datetime.now(timezone.utc).isoformat(),
+#                 "language": "en" 
+#             }
+            
+#             ACTIVE_CALLS[call_sid] = CONVERSATION_STORE[call_sid]
+            
+#             # 6. Save initial log
+#             await save_call_log(
+#                 call_sid=call_sid,
+#                 company_id=company_id,
+#                 lead_id=lead_id,
+#                 to_phone=to_phone,
+#                 from_phone=from_phone,
+#                 call_type=call_type,
+#                 call_status="initiated"
+#             )
+            
+#             # 7. Update metrics
+#             METRICS["calls_initiated"][call_type] += 1
+            
+#             logger.info(f"📞 Call initiated: {call_sid} -> {to_phone} via agent {agent_instance['agent_name'] if agent_instance else 'default'}")
+            
+#             return call_sid
+            
+#         except Exception as e:
+#             logger.error(f"Failed to make call: {e}", exc_info=True)
+#             METRICS["errors"]["call_initiation"] += 1
+#             raise
+
+
+
+
 async def make_outbound_call(
     company_id: int,
     lead_id: int,
@@ -34010,16 +34223,14 @@ async def make_outbound_call(
     name: str,
     call_type: str = "qualification",
     prompt_key: str = None,
-    agent_instance_id: int = None  # NEW PARAMETER
+    agent_instance_id: int = None
 ) -> str:
     """
-    Make outbound call with full Module 1 features
-    
-    Returns: call_sid
+    Make outbound call using agent-specific credentials (Twilio OAuth or SIP)
     """
     async with CALL_SEMAPHORE:
         try:
-            # 1. Get company config with agent instance support
+            # Get agent config
             config = await get_company_config(company_id, prompt_key, agent_instance_id)
             if not config:
                 raise ValueError(f"No config found for company {company_id}")
@@ -34028,34 +34239,91 @@ async def make_outbound_call(
             agent_cfg = config["agent"]
             agent_instance = config.get("agent_instance")
             
-            # 2. Customize initial message
+            if not agent_instance:
+                raise ValueError(f"Agent instance {agent_instance_id} not found")
+            
+            # Prepare initial message
             initial_msg = agent_cfg["initial_message"].replace("{{name}}", name or "there")
             
-            # 3. Determine which phone number to use
-            from_phone = agent_instance['phone_number'] if agent_instance and agent_instance['phone_number'] else company["phone_number"]
+            # ✅ DETECT PROVIDER: Twilio OAuth or SIP
+            sip_provider = agent_instance.get('sip_provider', 'twilio')
             
-            # 4. Create Twilio call
-            client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-            
-            call = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: client.calls.create(
-                    to=to_phone,
-                    from_=from_phone,  # USE AGENT-SPECIFIC NUMBER
-                    url=f"https://{BASE_URL}/inbound_call",
-                    status_callback=f"https://{BASE_URL}/call_status",
-                    status_callback_method="POST",
-                    status_callback_event=["initiated", "ringing", "answered", "completed"],
-                    record=True,
-                    recording_channels="dual",
-                    recording_status_callback=f"https://{BASE_URL}/recording_status",
-                    recording_status_callback_method="POST"
+            if sip_provider == 'twilio' and agent_instance.get('twilio_credentials'):
+                # ==================== TWILIO OAUTH ====================
+                twilio_creds = agent_instance['twilio_credentials']
+                account_sid = twilio_creds.get('account_sid')
+                auth_token = twilio_creds.get('auth_token')
+                from_phone = agent_instance.get('phone_number') or twilio_creds.get('phone_number')
+                
+                if not account_sid or not auth_token or not from_phone:
+                    raise ValueError("Invalid Twilio credentials")
+                
+                client = Client(account_sid, auth_token)
+                
+                call = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: client.calls.create(
+                        to=to_phone,
+                        from_=from_phone,
+                        url=f"https://{BASE_URL}/inbound_call",
+                        status_callback=f"https://{BASE_URL}/call_status",
+                        status_callback_method="POST",
+                        status_callback_event=["initiated", "ringing", "answered", "completed"],
+                        record=True,
+                        recording_channels="dual",
+                        recording_status_callback=f"https://{BASE_URL}/recording_status",
+                        recording_status_callback_method="POST"
+                    )
                 )
-            )
+                
+                call_sid = call.sid
+                logger.info(f"📞 Twilio call initiated: {call_sid} via {from_phone}")
+                
+            elif sip_provider in ['airtel', 'custom'] and agent_instance.get('sip_credentials'):
+                # ==================== AIRTEL/CUSTOM SIP ====================
+                sip_creds = agent_instance['sip_credentials']
+                sip_domain = sip_creds.get('sip_domain')
+                sip_username = sip_creds.get('sip_username')
+                sip_password = sip_creds.get('sip_password')
+                from_phone = sip_creds.get('did_number')
+                
+                if not all([sip_domain, sip_username, sip_password, from_phone]):
+                    raise ValueError("Invalid SIP credentials")
+                
+                # Use Twilio's SIP feature to route via Airtel
+                # Requires Twilio account with SIP enabled
+                fallback_account_sid = os.getenv("TWILIO_ACCOUNT_SID")  # System Twilio for SIP routing
+                fallback_auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+                
+                if not fallback_account_sid or not fallback_auth_token:
+                    raise ValueError("System Twilio credentials not configured for SIP routing")
+                
+                client = Client(fallback_account_sid, fallback_auth_token)
+                
+                # Construct SIP URI
+                sip_uri = f"sip:{to_phone}@{sip_domain};transport=udp"
+                
+                call = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: client.calls.create(
+                        to=sip_uri,
+                        from_=from_phone,
+                        url=f"https://{BASE_URL}/inbound_call",
+                        status_callback=f"https://{BASE_URL}/call_status",
+                        status_callback_method="POST",
+                        status_callback_event=["initiated", "ringing", "answered", "completed"],
+                        record=True,
+                        send_digits="wwww1234#"  # Optional: for IVR navigation
+                    )
+                )
+                
+                call_sid = call.sid
+                logger.info(f"📞 SIP call initiated: {call_sid} via {sip_provider} ({from_phone})")
+                
+            else:
+                raise ValueError(f"No valid credentials found for agent {agent_instance_id}. Please configure Twilio OAuth or SIP credentials.")
             
-            call_sid = call.sid
-            
-            # 5. Store conversation data with agent instance info
+            # Store conversation context
             CONVERSATION_STORE[call_sid] = {
                 "call_sid": call_sid,
                 "company_id": company_id,
@@ -34065,15 +34333,16 @@ async def make_outbound_call(
                 "name": name,
                 "call_type": call_type,
                 "prompt_key": prompt_key,
-                "agent_instance_id": agent_instance_id,  # NEW FIELD
-                "agent_name": agent_instance['agent_name'] if agent_instance else 'default',  # NEW FIELD
+                "agent_instance_id": agent_instance_id,
+                "agent_name": agent_instance['agent_name'],
+                "sip_provider": sip_provider,
                 "started_at": datetime.now(timezone.utc).isoformat(),
-                "language": "en" 
+                "language": "en"
             }
             
             ACTIVE_CALLS[call_sid] = CONVERSATION_STORE[call_sid]
             
-            # 6. Save initial log
+            # Save call log
             await save_call_log(
                 call_sid=call_sid,
                 company_id=company_id,
@@ -34084,19 +34353,48 @@ async def make_outbound_call(
                 call_status="initiated"
             )
             
-            # 7. Update metrics
             METRICS["calls_initiated"][call_type] += 1
-            
-            logger.info(f"📞 Call initiated: {call_sid} -> {to_phone} via agent {agent_instance['agent_name'] if agent_instance else 'default'}")
             
             return call_sid
             
         except Exception as e:
             logger.error(f"Failed to make call: {e}", exc_info=True)
             METRICS["errors"]["call_initiation"] += 1
+
+            await handle_call_failure(
+                company_id=company_id,
+                lead_id=lead_id,
+                to_phone=to_phone,
+                from_phone=agent_instance.get('phone_number') if agent_instance else "unknown",
+                call_type=call_type,
+                error_message=str(e)
+            )
+            
             raise
 
 
+
+
+def verify_webhook_signature(request: Request, expected_token: str = None) -> bool:
+    """
+    ✅ NEW: Verify webhook came from Twilio/n8n
+    """
+    # For Twilio webhooks
+    if expected_token:
+        signature = request.headers.get("X-Twilio-Signature", "")
+        url = str(request.url)
+        
+        # Simple token validation (enhance with HMAC in production)
+        if not signature and not expected_token:
+            return True  # Skip validation if no token configured
+        
+        return signature == expected_token
+    
+    # For n8n webhooks - check API key
+    api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
+    valid_key = os.getenv("N8N_WEBHOOK_KEY", "your-secret-key")
+    
+    return api_key == valid_key
 
 # ============================================
 # SCHEDULER
@@ -34307,6 +34605,10 @@ async def call_status_callback(request: Request):
     Module 1 Requirement: Call status tracking
     """
     try:
+        if not verify_webhook_signature(request):
+            logger.warning("⚠️ Unauthorized webhook attempt")
+            return JSONResponse(status_code=403, content={"error": "Unauthorized"})
+        
         form_data = await request.form()
         call_sid = form_data.get("CallSid")
         call_status = form_data.get("CallStatus")

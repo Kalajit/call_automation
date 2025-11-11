@@ -6708,7 +6708,7 @@ from typing import Optional, Dict, List
 import time
 
 # ==================== CONFIGURATION ====================
-API_BASE_URL = "https://4c6a33bb0dd3.ngrok-free.app/api"
+API_BASE_URL = "https://noily-deena-ancestrally.ngrok-free.dev/api"
 PYTHON_API_URL = "http://localhost:8000/api"
 N8N_WEBHOOK_URL = "https://n8n-render-host-n0ym.onrender.com/webhook-test/webhook/whatsapp-trigger"
 

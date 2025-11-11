@@ -12,3 +12,6 @@ CTranslate2
 huggingface-hub
 tqdm
 python-dotenv
+pydantic==2.5.3
+deepl==1.17.0
+httpx==0.26.0

@@ -7590,6 +7590,306 @@ def render_lead_edit(lead):
 
 
 
+
+def render_lead_sources_settings():
+    """
+    Render Lead Sources OAuth connection management
+    """
+    st.subheader("📥 Lead Source Integrations")
+    
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                color: white; padding: 20px; border-radius: 10px; margin: 20px 0;">
+        <h3 style="margin: 0 0 10px 0;">🚀 Connect Your Lead Sources</h3>
+        <p style="margin: 0; font-size: 14px;">
+            Automatically import leads from Meta Ads, Google Ads, and LinkedIn Ads with OAuth
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Get OAuth status
+    oauth_status_resp = api_get(f"oauth/status/{st.session_state.company_id}")
+    
+    if oauth_status_resp and oauth_status_resp.get('success'):
+        oauth_data = oauth_status_resp['data']
+        
+        # Create a dict for easy lookup
+        oauth_dict = {item['platform']: item for item in oauth_data}
+    else:
+        oauth_dict = {}
+    
+    # ========================================
+    # META ADS SECTION
+    # ========================================
+    st.markdown("---")
+    st.markdown("### 📘 Meta Ads (Facebook)")
+    
+    meta_connected = 'meta' in oauth_dict and oauth_dict['meta'].get('is_active')
+    
+    if meta_connected:
+        meta_info = oauth_dict['meta']
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("📱 Account", meta_info.get('account_name', 'Unknown'))
+        with col2:
+            days_left = meta_info.get('days_until_expiry')
+            if days_left:
+                if days_left < 7:
+                    st.metric("⚠️ Token Expires", f"{days_left} days", delta_color="inverse")
+                else:
+                    st.metric("🔑 Token Valid", f"{days_left} days")
+            else:
+                st.metric("🔑 Status", "Active")
+        with col3:
+            st.success("✅ Connected")
+        
+        # Show lead forms
+        with st.expander("📋 View Lead Forms"):
+            forms_resp = api_get(f"lead-sources/meta/forms/{st.session_state.company_id}")
+            if forms_resp and forms_resp.get('success'):
+                forms = forms_resp['forms']
+                if forms:
+                    for form in forms:
+                        st.write(f"**{form['name']}** (ID: {form['id']}) - Leads: {form.get('leads_count', 0)}")
+                else:
+                    st.info("No lead forms found")
+        
+        # Disconnect button
+        if st.button("❌ Disconnect Meta", key="disconnect_meta"):
+            result = api_delete(f"oauth/{st.session_state.company_id}/meta")
+            if result and result.get('success'):
+                st.success("Meta Ads disconnected!")
+                time.sleep(1)
+                st.rerun()
+    else:
+        st.warning("⚠️ Meta Ads not connected")
+        
+        if st.button("🔗 Connect Meta Ads", use_container_width=True, type="primary", key="connect_meta"):
+            with st.spinner("Initializing Meta OAuth..."):
+                oauth_resp = api_get(f"oauth/meta/start?company_id={st.session_state.company_id}")
+                
+                if oauth_resp and oauth_resp.get('success'):
+                    # auth_url = oauth_resp['data']['auth_url']
+                    auth_url = oauth_resp.get('data', {}).get('auth_url') or oauth_resp.get('auth_url')
+
+                    
+                    st.markdown(f"""
+                    <div style="background: #e3f2fd; padding: 30px; border-radius: 15px; margin: 20px 0; text-align: center;">
+                        <h3 style="color: #1976d2; margin-bottom: 20px;">🔐 Meta OAuth Ready</h3>
+                        <p style="color: #424242; margin-bottom: 25px;">
+                            Click below to authorize access to your Meta Ads account:
+                        </p>
+                        <a href="{auth_url}" target="_blank" style="
+                            background: linear-gradient(135deg, #1877F2 0%, #0C63D4 100%);
+                            color: white; 
+                            padding: 18px 40px; 
+                            border-radius: 10px; 
+                            text-decoration: none; 
+                            display: inline-block;
+                            font-weight: bold;
+                            font-size: 18px;
+                            box-shadow: 0 4px 15px rgba(24, 119, 242, 0.4);
+                        ">
+                            🚀 Authorize Meta Ads
+                        </a>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.error("Failed to initialize Meta OAuth")
+    
+    # ========================================
+    # GOOGLE ADS SECTION
+    # ========================================
+    st.markdown("---")
+    st.markdown("### 🔴 Google Ads")
+    
+    google_connected = 'google_ads' in oauth_dict and oauth_dict['google_ads'].get('is_active')
+    
+    if google_connected:
+        google_info = oauth_dict['google_ads']
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("📱 Customer ID", google_info.get('account_id', 'Unknown'))
+        with col2:
+            days_left = google_info.get('days_until_expiry')
+            if days_left:
+                if days_left < 7:
+                    st.metric("⚠️ Token Expires", f"{days_left} days", delta_color="inverse")
+                else:
+                    st.metric("🔑 Token Valid", f"{days_left} days")
+            else:
+                st.metric("🔑 Status", "Active")
+        with col3:
+            st.success("✅ Connected")
+        
+        # Disconnect button
+        if st.button("❌ Disconnect Google Ads", key="disconnect_google"):
+            result = api_delete(f"oauth/{st.session_state.company_id}/google_ads")
+            if result and result.get('success'):
+                st.success("Google Ads disconnected!")
+                time.sleep(1)
+                st.rerun()
+    else:
+        st.warning("⚠️ Google Ads not connected")
+        
+        if st.button("🔗 Connect Google Ads", use_container_width=True, type="primary", key="connect_google"):
+            with st.spinner("Initializing Google OAuth..."):
+                oauth_resp = api_get(f"oauth/google-ads/start?company_id={st.session_state.company_id}")
+                
+                if oauth_resp and oauth_resp.get('success'):
+                    # auth_url = oauth_resp['data']['auth_url']
+                    auth_url = oauth_resp.get('data', {}).get('auth_url') or oauth_resp.get('auth_url')
+
+                    
+                    st.markdown(f"""
+                    <div style="background: #e3f2fd; padding: 30px; border-radius: 15px; margin: 20px 0; text-align: center;">
+                        <h3 style="color: #1976d2; margin-bottom: 20px;">🔐 Google OAuth Ready</h3>
+                        <p style="color: #424242; margin-bottom: 25px;">
+                            Click below to authorize access to your Google Ads account:
+                        </p>
+                        <a href="{auth_url}" target="_blank" style="
+                            background: linear-gradient(135deg, #EA4335 0%, #FBBC04 100%);
+                            color: white; 
+                            padding: 18px 40px; 
+                            border-radius: 10px; 
+                            text-decoration: none; 
+                            display: inline-block;
+                            font-weight: bold;
+                            font-size: 18px;
+                            box-shadow: 0 4px 15px rgba(234, 67, 53, 0.4);
+                        ">
+                            🚀 Authorize Google Ads
+                        </a>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.error("Failed to initialize Google OAuth")
+    
+    # ========================================
+    # LINKEDIN ADS SECTION
+    # ========================================
+    st.markdown("---")
+    st.markdown("### 💼 LinkedIn Ads")
+    
+    linkedin_connected = 'linkedin' in oauth_dict and oauth_dict['linkedin'].get('is_active')
+    
+    if linkedin_connected:
+        linkedin_info = oauth_dict['linkedin']
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("📱 Account", linkedin_info.get('account_name', 'Unknown'))
+        with col2:
+            days_left = linkedin_info.get('days_until_expiry')
+            if days_left:
+                if days_left < 7:
+                    st.metric("⚠️ Token Expires", f"{days_left} days", delta_color="inverse")
+                else:
+                    st.metric("🔑 Token Valid", f"{days_left} days")
+            else:
+                st.metric("🔑 Status", "Active")
+        with col3:
+            st.success("✅ Connected")
+        
+        # Disconnect button
+        if st.button("❌ Disconnect LinkedIn", key="disconnect_linkedin"):
+            result = api_delete(f"oauth/{st.session_state.company_id}/linkedin")
+            if result and result.get('success'):
+                st.success("LinkedIn Ads disconnected!")
+                time.sleep(1)
+                st.rerun()
+    else:
+        st.warning("⚠️ LinkedIn Ads not connected")
+        
+        if st.button("🔗 Connect LinkedIn Ads", use_container_width=True, type="primary", key="connect_linkedin"):
+            with st.spinner("Initializing LinkedIn OAuth..."):
+                oauth_resp = api_get(f"oauth/linkedin/start?company_id={st.session_state.company_id}")
+                
+                if oauth_resp and oauth_resp.get('success'):
+                    # auth_url = oauth_resp['data']['auth_url']
+                    auth_url = oauth_resp.get('data', {}).get('auth_url') or oauth_resp.get('auth_url')
+
+                    
+                    st.markdown(f"""
+                    <div style="background: #e3f2fd; padding: 30px; border-radius: 15px; margin: 20px 0; text-align: center;">
+                        <h3 style="color: #1976d2; margin-bottom: 20px;">🔐 LinkedIn OAuth Ready</h3>
+                        <p style="color: #424242; margin-bottom: 25px;">
+                            Click below to authorize access to your LinkedIn Ads account:
+                        </p>
+                        <a href="{auth_url}" target="_blank" style="
+                            background: linear-gradient(135deg, #0077B5 0%, #005885 100%);
+                            color: white; 
+                            padding: 18px 40px; 
+                            border-radius: 10px; 
+                            text-decoration: none; 
+                            display: inline-block;
+                            font-weight: bold;
+                            font-size: 18px;
+                            box-shadow: 0 4px 15px rgba(0, 119, 181, 0.4);
+                        ">
+                            🚀 Authorize LinkedIn Ads
+                        </a>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.error("Failed to initialize LinkedIn OAuth")
+    
+    # ========================================
+    # LEAD SOURCE CONFIGURATIONS
+    # ========================================
+    st.markdown("---")
+    st.markdown("### 🗺️ Lead Source Field Mappings")
+    
+    configs_resp = api_get(f"lead-sources/configs/{st.session_state.company_id}")
+    
+    if configs_resp and configs_resp.get('success') and configs_resp['data']:
+        for config in configs_resp['data']:
+            with st.expander(f"📋 {config['platform'].upper()} - {config['form_name']}"):
+                st.write(f"**Form ID:** {config['form_id']}")
+                st.write(f"**Status:** {'🟢 Active' if config['is_active'] else '🔴 Inactive'}")
+                st.write(f"**Platform Connected:** {'✅ Yes' if config.get('platform_connected') else '❌ No'}")
+                
+                st.markdown("**Field Mappings:**")
+                mappings = config['field_mappings']
+                if mappings:
+                    for platform_field, crm_field in mappings.items():
+                        st.write(f"• `{platform_field}` → `{crm_field}`")
+                else:
+                    st.info("No field mappings configured")
+                
+                st.markdown(f"**Webhook URL:**")
+                st.code(config['webhook_url'], language="text")
+    else:
+        st.info("No lead source configurations yet. Connect a platform above to get started!")
+    
+    # ========================================
+    # IMPORT STATS
+    # ========================================
+    st.markdown("---")
+    st.markdown("### 📊 Lead Import Statistics")
+    
+    stats_resp = api_get(f"lead-imports/stats/{st.session_state.company_id}")
+    
+    if stats_resp and stats_resp.get('success') and stats_resp['data']:
+        df = pd.DataFrame(stats_resp['data'])
+        
+        # Group by platform and status
+        summary = df.groupby(['platform', 'status'])['count'].sum().unstack(fill_value=0)
+        
+        st.dataframe(summary, use_container_width=True)
+        
+        # Visualization
+        fig = px.bar(df, x='platform', y='count', color='status',
+                    title='Lead Imports by Platform and Status',
+                    barmode='group')
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No import statistics available yet")
+
+
+
 def render_whatsapp_oauth_setup(agent):
     """
     Render WhatsApp OAuth setup UI for an agent instance
@@ -9251,10 +9551,148 @@ def page_notifications():
             st.info("No alerts")
 
 # ==================== PAGE: SETTINGS ====================
+# def page_settings():
+#     st.title("⚙️ Settings & Configuration")
+    
+#     tab1, tab2, tab3, tab4 = st.tabs(["Company Info", "Custom Fields", "Integrations", "API Keys"])
+    
+#     with tab1:
+#         st.subheader("🏢 Company Information")
+        
+#         company_resp = api_get(f"companies/{st.session_state.company_id}")
+#         if company_resp and company_resp.get('success'):
+#             company = company_resp['data']
+            
+#             with st.form("update_company"):
+#                 name = st.text_input("Company Name", value=company.get('name', ''))
+#                 phone = st.text_input("Phone Number", value=company.get('phone_number', ''))
+                
+#                 if st.form_submit_button("Update Company"):
+#                     result = api_patch(f"companies/{st.session_state.company_id}", {
+#                         "name": name,
+#                         "phone_number": phone
+#                     })
+#                     if result and result.get('success'):
+#                         st.success("Company updated!")
+#                         st.rerun()
+        
+#         st.divider()
+        
+#         st.subheader("🕐 Calling Hours Configuration")
+        
+#         with st.form("calling_hours"):
+#             col1, col2 = st.columns(2)
+#             with col1:
+#                 start_hour = st.number_input("Start Hour (24h)", 0, 23, 9)
+#             with col2:
+#                 end_hour = st.number_input("End Hour (24h)", 0, 23, 18)
+            
+#             call_rate = st.number_input("Calls per Minute", 1, 10, 2)
+#             max_concurrent = st.number_input("Max Concurrent Calls", 1, 20, 5)
+            
+#             if st.form_submit_button("Save Calling Hours"):
+#                 result = api_patch(f"companies/{st.session_state.company_id}/calling-hours", {
+#                     "start_hour": start_hour,
+#                     "end_hour": end_hour,
+#                     "call_rate_per_minute": call_rate,
+#                     "max_concurrent_calls": max_concurrent
+#                 })
+#                 if result and result.get('success'):
+#                     st.success("✅ Calling hours updated!")
+    
+#     with tab2:
+#         st.subheader("🔧 Custom Field Templates")
+        
+#         templates_resp = api_get("extraction-templates")
+        
+#         if templates_resp and templates_resp.get('success'):
+#             for template in templates_resp['data']:
+#                 with st.expander(f"📋 {template['template_name']} ({template['industry']})"):
+#                     st.write(f"**Description:** {template['description']}")
+                    
+#                     fields = template['field_definitions'].get('fields', [])
+#                     st.write(f"**Fields:** {len(fields)}")
+                    
+#                     if st.button(f"Apply to Company", key=f"template_{template['id']}"):
+#                         result = api_post(f"companies/{st.session_state.company_id}/apply-template", {
+#                             "template_id": template['id']
+#                         })
+#                         if result and result.get('success'):
+#                             st.success(f"✅ Applied {len(result['data'])} field definitions!")
+#                             st.rerun()
+        
+#         st.divider()
+        
+#         st.subheader("Create Custom Field")
+#         with st.form("custom_field"):
+#             field_key = st.text_input("Field Key", placeholder="chess_rating")
+#             field_label = st.text_input("Field Label", placeholder="Chess Rating")
+#             field_type = st.selectbox("Field Type", ["text", "number", "date", "email", "select"])
+#             field_category = st.selectbox("Category", ["personal", "qualification", "preference"])
+            
+#             if st.form_submit_button("Create Field"):
+#                 result = api_post("custom-fields", {
+#                     "company_id": st.session_state.company_id,
+#                     "field_key": field_key,
+#                     "field_label": field_label,
+#                     "field_type": field_type,
+#                     "field_category": field_category
+#                 })
+#                 if result and result.get('success'):
+#                     st.success("✅ Custom field created!")
+#                 else:
+#                     st.error("Failed to create field")
+    
+#     with tab3:
+#         st.subheader("🔗 Integration Status")
+        
+#         integrations = {
+#             "WhatsApp Business API": "✅ Connected",
+#             "Twilio Voice": "✅ Connected",
+#             "Google Calendar": "✅ Connected",
+#             "Stripe Payments": "⚠️ Not Configured",
+#             "Razorpay": "⚠️ Not Configured",
+#             "SendGrid Email": "⚠️ Not Configured"
+#         }
+        
+#         for name, status in integrations.items():
+#             col1, col2 = st.columns([3, 1])
+#             with col1:
+#                 st.write(f"**{name}**")
+#             with col2:
+#                 st.write(status)
+        
+#         st.divider()
+        
+#         st.subheader("📊 System Health")
+#         health_resp = api_get("health")
+#         if health_resp:
+#             st.json(health_resp)
+    
+#     with tab4:
+#         st.subheader("🔑 API Keys & Webhooks")
+        
+#         st.markdown("### Webhook URLs")
+        
+#         st.markdown("**WhatsApp Webhook:**")
+#         st.code(f"{API_BASE_URL.replace('/api', '')}/api/webhooks/whatsapp-universal")
+#         # st.code(N8N_WEBHOOK_URL)
+        
+#         st.markdown("**n8n Webhook:**")
+#         # st.code(N8N_WEBHOOK_URL)
+#         st.code(f"{API_BASE_URL.replace('/api', '')}/api/webhooks/whatsapp-universal")
+        
+#         st.divider()
+        
+#         st.markdown("### API Configuration")
+#         st.info("API keys are configured in environment variables. Contact your system administrator to update them.")
+
+
+
 def page_settings():
     st.title("⚙️ Settings & Configuration")
     
-    tab1, tab2, tab3, tab4 = st.tabs(["Company Info", "Custom Fields", "Integrations", "API Keys"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Company Info", "Lead Sources", "Integrations", "API Keys"])
     
     with tab1:
         st.subheader("🏢 Company Information")
@@ -9301,47 +9739,7 @@ def page_settings():
                     st.success("✅ Calling hours updated!")
     
     with tab2:
-        st.subheader("🔧 Custom Field Templates")
-        
-        templates_resp = api_get("extraction-templates")
-        
-        if templates_resp and templates_resp.get('success'):
-            for template in templates_resp['data']:
-                with st.expander(f"📋 {template['template_name']} ({template['industry']})"):
-                    st.write(f"**Description:** {template['description']}")
-                    
-                    fields = template['field_definitions'].get('fields', [])
-                    st.write(f"**Fields:** {len(fields)}")
-                    
-                    if st.button(f"Apply to Company", key=f"template_{template['id']}"):
-                        result = api_post(f"companies/{st.session_state.company_id}/apply-template", {
-                            "template_id": template['id']
-                        })
-                        if result and result.get('success'):
-                            st.success(f"✅ Applied {len(result['data'])} field definitions!")
-                            st.rerun()
-        
-        st.divider()
-        
-        st.subheader("Create Custom Field")
-        with st.form("custom_field"):
-            field_key = st.text_input("Field Key", placeholder="chess_rating")
-            field_label = st.text_input("Field Label", placeholder="Chess Rating")
-            field_type = st.selectbox("Field Type", ["text", "number", "date", "email", "select"])
-            field_category = st.selectbox("Category", ["personal", "qualification", "preference"])
-            
-            if st.form_submit_button("Create Field"):
-                result = api_post("custom-fields", {
-                    "company_id": st.session_state.company_id,
-                    "field_key": field_key,
-                    "field_label": field_label,
-                    "field_type": field_type,
-                    "field_category": field_category
-                })
-                if result and result.get('success'):
-                    st.success("✅ Custom field created!")
-                else:
-                    st.error("Failed to create field")
+        render_lead_sources_settings()
     
     with tab3:
         st.subheader("🔗 Integration Status")
@@ -9376,16 +9774,16 @@ def page_settings():
         
         st.markdown("**WhatsApp Webhook:**")
         st.code(f"{API_BASE_URL.replace('/api', '')}/api/webhooks/whatsapp-universal")
-        # st.code(N8N_WEBHOOK_URL)
         
         st.markdown("**n8n Webhook:**")
-        # st.code(N8N_WEBHOOK_URL)
         st.code(f"{API_BASE_URL.replace('/api', '')}/api/webhooks/whatsapp-universal")
         
         st.divider()
         
         st.markdown("### API Configuration")
         st.info("API keys are configured in environment variables. Contact your system administrator to update them.")
+
+
 
 # ==================== PAGE: LOGIN ====================
 def page_login():

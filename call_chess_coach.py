@@ -32615,18 +32615,14 @@ from typing import Optional, Tuple, Dict, List
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections import defaultdict
-
 from fastapi import FastAPI, Request, Response, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, validator
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-
 import asyncpg
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse
-
-# Vocode imports
 from vocode.streaming.telephony.server.base import TelephonyServer, TwilioInboundCallConfig
 from vocode.streaming.models.telephony import TwilioConfig
 from vocode.streaming.models.agent import LangchainAgentConfig, AgentConfig
@@ -32642,21 +32638,13 @@ from vocode.streaming.agent.base_agent import BaseAgent
 from vocode.streaming.models.events import Event, EventType
 from vocode.streaming.models.transcript import TranscriptCompleteEvent
 from vocode.streaming.utils import events_manager
-
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 from langchain_classic.chains import LLMChain
-
-
 import aiosmtplib
 from email.mime.text import MIMEText
-
-
-
-
 from langdetect import detect
 from langdetect.lang_detect_exception import LangDetectException
-
 import websockets  
 
 

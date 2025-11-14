@@ -8494,6 +8494,440 @@ def render_airtel_sip_setup(agent):
 
 
 
+
+
+
+def render_email_scanning_settings():
+    """
+    Render Email Scanning OAuth setup and management UI
+    """
+    st.subheader("📧 Email Inbox Scanning")
+    
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                color: white; padding: 20px; border-radius: 10px; margin: 20px 0;">
+        <h3 style="margin: 0 0 10px 0;">🚀 Auto-Extract Leads from Your Email Inbox</h3>
+        <p style="margin: 0; font-size: 14px;">
+            Connect your Gmail or Outlook account to automatically scan emails for lead information.
+            Our AI extracts contact details and creates leads automatically!
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Get email scanning status
+    status_resp = api_get(f"email/status/{st.session_state.company_id}")
+    
+    if status_resp and status_resp.get('success'):
+        email_accounts = status_resp['data']
+        
+        if email_accounts:
+            st.markdown("### 📬 Connected Email Accounts")
+            
+            for account in email_accounts:
+                with st.expander(f"📧 {account['email_address']} ({account['provider'].upper()})"):
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        status_icon = "🟢" if account['is_active'] else "🔴"
+                        st.metric("Status", f"{status_icon} {'Active' if account['is_active'] else 'Inactive'}")
+                    
+                    with col2:
+                        st.metric("📨 Total Scanned", account.get('total_scanned', 0))
+                    
+                    with col3:
+                        st.metric("👥 Leads Extracted", account.get('leads_extracted', 0))
+                    
+                    with col4:
+                        days_left = account.get('days_until_expiry')
+                        if days_left is not None:
+                            if days_left < 7:
+                                st.metric("⚠️ Token Expires", f"{days_left} days", delta_color="inverse")
+                            else:
+                                st.metric("🔑 Token Valid", f"{days_left} days")
+                        else:
+                            st.metric("🔑 Status", "Active")
+                    
+                    # Last scan info
+                    if account.get('last_scan_at'):
+                        st.info(f"🕐 Last scanned: {account['last_scan_at'][:19]}")
+                    else:
+                        st.warning("⚠️ Never scanned yet")
+                    
+                    # Reauth warning
+                    if account.get('needs_reauth'):
+                        st.error("⚠️ **Token expired!** Please reconnect your account.")
+                    
+                    # Action buttons
+                    st.divider()
+                    col_btn1, col_btn2, col_btn3 = st.columns(3)
+                    
+                    with col_btn1:
+                        if st.button("🔄 Scan Now", key=f"scan_{account['id']}", 
+                                   help="Manually trigger email scan"):
+                            with st.spinner("Scanning inbox..."):
+                                scan_resp = api_post(f"email/scan/{st.session_state.company_id}", {})
+                                
+                                if scan_resp and scan_resp.get('success'):
+                                    scanned = scan_resp.get('scanned', 0)
+                                    st.success(f"✅ Scanned {scanned} emails!")
+                                    
+                                    if scan_resp.get('results'):
+                                        new_leads = sum(1 for r in scan_resp['results'] if r.get('is_new'))
+                                        st.info(f"📊 {new_leads} new leads created!")
+                                    
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Scan failed. Check credentials.")
+                    
+                    with col_btn2:
+                        if st.button("📋 View Logs", key=f"logs_{account['id']}", 
+                                   help="View scan history"):
+                            st.session_state[f'show_logs_{account["id"]}'] = True
+                    
+                    with col_btn3:
+                        if st.button("❌ Disconnect", key=f"disconnect_{account['id']}", 
+                                   help="Remove email connection"):
+                            if st.checkbox(f"✓ Confirm disconnection", 
+                                         key=f"confirm_disconnect_{account['id']}"):
+                                with st.spinner("Disconnecting..."):
+                                    disconnect_resp = api_delete(f"email/disconnect/{account['id']}")
+                                    
+                                    if disconnect_resp and disconnect_resp.get('success'):
+                                        st.success("✅ Email account disconnected!")
+                                        time.sleep(1)
+                                        st.rerun()
+                                    else:
+                                        st.error("❌ Failed to disconnect")
+                    
+                    # Show scan logs if requested
+                    if st.session_state.get(f'show_logs_{account["id"]}'):
+                        st.divider()
+                        st.markdown("#### 📊 Recent Scan Logs")
+                        
+                        logs_resp = api_get(f"email/scan-logs/{st.session_state.company_id}?limit=10")
+                        
+                        if logs_resp and logs_resp.get('success') and logs_resp.get('data'):
+                            for log in logs_resp['data']:
+                                status_emoji = {
+                                    'success': '✅',
+                                    'skipped': '⏭️',
+                                    'failed': '❌',
+                                    'pending': '⏳'
+                                }.get(log.get('status', 'pending'), '❓')
+                                
+                                with st.expander(f"{status_emoji} {log.get('from_email', 'Unknown')} - {log.get('subject', 'No subject')[:50]}"):
+                                    col_log1, col_log2 = st.columns(2)
+                                    
+                                    with col_log1:
+                                        st.write(f"**From:** {log.get('from_email', 'N/A')}")
+                                        st.write(f"**Subject:** {log.get('subject', 'N/A')}")
+                                        st.write(f"**Status:** {log.get('status', 'N/A')}")
+                                    
+                                    with col_log2:
+                                        st.write(f"**Lead ID:** {log.get('lead_id', 'N/A')}")
+                                        st.write(f"**Lead Name:** {log.get('lead_name', 'N/A')}")
+                                        st.write(f"**Scanned:** {log.get('created_at', 'N/A')[:19]}")
+                                    
+                                    if log.get('extracted_data'):
+                                        st.json(log['extracted_data'])
+                                    
+                                    if log.get('error_message'):
+                                        st.error(f"Error: {log['error_message']}")
+                        else:
+                            st.info("No scan logs yet")
+                        
+                        if st.button("Hide Logs", key=f"hide_logs_{account['id']}"):
+                            st.session_state[f'show_logs_{account["id"]}'] = False
+                            st.rerun()
+        else:
+            st.info("No email accounts connected yet")
+    else:
+        st.warning("Unable to fetch email scanning status")
+    
+    # Connect new email accounts
+    st.markdown("---")
+    st.markdown("### 🔗 Connect New Email Account")
+    
+    col_connect1, col_connect2 = st.columns(2)
+    
+    # Gmail Connection
+    with col_connect1:
+        st.markdown("""
+        <div style="background: #f8f9fa; padding: 20px; border-radius: 10px; border: 2px solid #4285F4;">
+            <h4 style="color: #4285F4; margin: 0 0 10px 0;">📧 Gmail</h4>
+            <p style="font-size: 14px; color: #666; margin: 0;">
+                Connect your Gmail account to scan emails for leads automatically.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("")
+        
+        if st.button("🔗 Connect Gmail", use_container_width=True, 
+                   type="primary", key="connect_gmail"):
+            with st.spinner("🔄 Initializing Gmail OAuth..."):
+                oauth_resp = api_get(
+                    f"email/oauth/gmail/start?company_id={st.session_state.company_id}"
+                )
+                
+                # if oauth_resp and oauth_resp.get('success'):
+                #     auth_url = oauth_resp['data']['auth_url']
+                    
+                #     st.markdown(f"""
+                #     <div style="background: #e3f2fd; padding: 30px; border-radius: 15px; margin: 20px 0; text-align: center;">
+                #         <h3 style="color: #1976d2; margin-bottom: 20px;">🔐 Gmail OAuth Ready</h3>
+                #         <p style="color: #424242; margin-bottom: 25px; font-size: 16px;">
+                #             Click the button below to authorize Gmail access:
+                #         </p>
+                #         <a href="{auth_url}" target="_blank" style="
+                #             background: linear-gradient(135deg, #4285F4 0%, #34A853 100%);
+                #             color: white; 
+                #             padding: 18px 40px; 
+                #             border-radius: 10px; 
+                #             text-decoration: none; 
+                #             display: inline-block;
+                #             font-weight: bold;
+                #             font-size: 18px;
+                #             box-shadow: 0 4px 15px rgba(66, 133, 244, 0.4);
+                #         ">
+                #             🚀 Authorize Gmail
+                #         </a>
+                #         <p style="color: #666; margin-top: 20px; font-size: 14px;">
+                #             You'll be redirected to Google for secure authentication.<br>
+                #             After approval, your inbox will be scanned every 15 minutes.
+                #         </p>
+                #     </div>
+                #     """, unsafe_allow_html=True)
+                # else:
+                #     st.error("❌ Failed to initialize Gmail OAuth")
+                #     st.error("**Possible causes:**")
+                #     st.markdown("""
+                #     - GMAIL_CLIENT_ID or GMAIL_CLIENT_SECRET not configured
+                #     - BASE_URL not set correctly
+                #     - Gmail OAuth app not created in Google Cloud Console
+                #     """)
+
+
+                if oauth_resp and oauth_resp.get('success') and oauth_resp.get('data'):
+                    auth_url = oauth_resp['data'].get('auth_url')
+
+                    if not auth_url:
+                        st.error("❌ auth_url missing in API response")
+                        st.json(oauth_resp)
+                    else:
+                        st.markdown(f"""
+                        <div style="background: #e3f2fd; padding: 30px; border-radius: 15px; margin: 20px 0; text-align: center;">
+                            <h3 style="color: #1976d2; margin-bottom: 20px;">🔐 Gmail OAuth Ready</h3>
+                            <p style="color: #424242; margin-bottom: 25px; font-size: 16px;">
+                                Click the button below to authorize Gmail access:
+                            </p>
+                            <a href="{auth_url}" target="_blank" style="
+                                background: linear-gradient(135deg, #4285F4 0%, #34A853 100%);
+                                color: white; 
+                                padding: 18px 40px; 
+                                border-radius: 10px; 
+                                text-decoration: none; 
+                                display: inline-block;
+                                font-weight: bold;
+                                font-size: 18px;
+                                box-shadow: 0 4px 15px rgba(66, 133, 244, 0.4);
+                            ">
+                                🚀 Authorize Gmail
+                            </a>
+                            <p style="color: #666; margin-top: 20px; font-size: 14px;">
+                                You'll be redirected to Google for secure authentication.<br>
+                                After approval, your inbox will be scanned every 15 minutes.
+                            </p>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                else:
+                    st.error("❌ Failed to initialize Gmail OAuth")
+                    st.markdown("### Debug Response:")
+                    st.json(oauth_resp)
+                    st.error("**Possible causes:**")
+                    st.markdown("""
+                    - GMAIL_CLIENT_ID or GMAIL_CLIENT_SECRET not configured
+                    - BASE_URL not set correctly
+                    - Gmail OAuth app not created in Google Cloud Console
+                    """)
+
+    
+    # Outlook Connection
+    with col_connect2:
+        st.markdown("""
+        <div style="background: #f8f9fa; padding: 20px; border-radius: 10px; border: 2px solid #0078D4;">
+            <h4 style="color: #0078D4; margin: 0 0 10px 0;">📧 Outlook</h4>
+            <p style="font-size: 14px; color: #666; margin: 0;">
+                Connect your Outlook/Microsoft 365 account to scan emails for leads.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("")
+        
+        if st.button("🔗 Connect Outlook", use_container_width=True, 
+                   type="primary", key="connect_outlook"):
+            with st.spinner("🔄 Initializing Outlook OAuth..."):
+                oauth_resp = api_get(
+                    f"email/oauth/outlook/start?company_id={st.session_state.company_id}"
+                )
+                
+                if oauth_resp and oauth_resp.get('success'):
+                    auth_url = oauth_resp['data']['auth_url']
+                    
+                    st.markdown(f"""
+                    <div style="background: #e3f2fd; padding: 30px; border-radius: 15px; margin: 20px 0; text-align: center;">
+                        <h3 style="color: #1976d2; margin-bottom: 20px;">🔐 Outlook OAuth Ready</h3>
+                        <p style="color: #424242; margin-bottom: 25px; font-size: 16px;">
+                            Click the button below to authorize Outlook access:
+                        </p>
+                        <a href="{auth_url}" target="_blank" style="
+                            background: linear-gradient(135deg, #0078D4 0%, #106EBE 100%);
+                            color: white; 
+                            padding: 18px 40px; 
+                            border-radius: 10px; 
+                            text-decoration: none; 
+                            display: inline-block;
+                            font-weight: bold;
+                            font-size: 18px;
+                            box-shadow: 0 4px 15px rgba(0, 120, 212, 0.4);
+                        ">
+                            🚀 Authorize Outlook
+                        </a>
+                        <p style="color: #666; margin-top: 20px; font-size: 14px;">
+                            You'll be redirected to Microsoft for secure authentication.<br>
+                            After approval, your inbox will be scanned every 15 minutes.
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.error("❌ Failed to initialize Outlook OAuth")
+                    st.error("**Possible causes:**")
+                    st.markdown("""
+                    - OUTLOOK_CLIENT_ID or OUTLOOK_CLIENT_SECRET not configured
+                    - BASE_URL not set correctly
+                    - Outlook OAuth app not created in Azure Portal
+                    """)
+    
+    # How it works section
+    st.markdown("---")
+    st.markdown("### ℹ️ How Email Scanning Works")
+    
+    with st.expander("📖 Click to learn more"):
+        st.markdown("""
+        #### 🔄 Automatic Process
+        
+        1. **OAuth Connection**: You securely connect your Gmail or Outlook account
+        2. **Scheduled Scanning**: System scans your inbox every 15 minutes
+        3. **AI Extraction**: Groq AI analyzes emails to extract:
+           - Name
+           - Phone number
+           - Email address
+           - Company name
+           - Interest/intent
+           - Urgency level
+        4. **Lead Creation**: Valid leads are automatically created in your CRM
+        5. **Auto-Follow-up**: Welcome messages sent via WhatsApp (if configured)
+        
+        #### 🔒 Security & Privacy
+        
+        - ✅ All OAuth tokens are **AES-256 encrypted** in database
+        - ✅ We only read emails, never send or modify
+        - ✅ You can disconnect anytime
+        - ✅ Data is isolated per company (multi-tenant)
+        
+        #### 🎯 AI Rules Configuration
+        
+        By default, the AI looks for:
+        - **Keywords**: "interested", "inquiry", "quote", "demo"
+        - **Priority Keywords**: "urgent", "asap", "immediately"
+        - **Exclude Keywords**: "unsubscribe", "newsletter", "spam"
+        
+        Contact support to customize these rules for your business!
+        
+        #### 📊 What Gets Scanned
+        
+        - **Gmail**: INBOX folder, unread emails
+        - **Outlook**: Inbox folder, unread emails
+        - **Frequency**: Every 15 minutes (configurable)
+        - **Limits**: Last 10 unread emails per scan
+        
+        #### 🚀 Benefits
+        
+        - ⚡ **Never miss a lead** - Automatic 24/7 scanning
+        - 🤖 **AI-powered extraction** - 95%+ accuracy
+        - ⏱️ **Save time** - No manual data entry
+        - 📈 **Faster response** - Instant lead creation
+        - 🔗 **Multi-channel** - Email → CRM → WhatsApp → Calls
+        """)
+    
+    # Statistics Section
+    st.markdown("---")
+    st.markdown("### 📊 Email Scanning Statistics")
+    
+    # Fetch overall stats
+    logs_resp = api_get(f"email/scan-logs/{st.session_state.company_id}?limit=1000")
+    
+    if logs_resp and logs_resp.get('success') and logs_resp.get('data'):
+        logs = logs_resp['data']
+        
+        total_scanned = len(logs)
+        successful = sum(1 for log in logs if log.get('status') == 'success')
+        skipped = sum(1 for log in logs if log.get('status') == 'skipped')
+        failed = sum(1 for log in logs if log.get('status') == 'failed')
+        
+        col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+        
+        with col_stat1:
+            st.metric("📨 Total Scanned", total_scanned)
+        
+        with col_stat2:
+            st.metric("✅ Leads Created", successful)
+        
+        with col_stat3:
+            st.metric("⏭️ Skipped", skipped)
+        
+        with col_stat4:
+            st.metric("❌ Failed", failed)
+        
+        # Success rate
+        if total_scanned > 0:
+            success_rate = (successful / total_scanned) * 100
+            st.progress(success_rate / 100)
+            st.caption(f"Success Rate: {success_rate:.1f}%")
+        
+        # Show recent activity
+        st.divider()
+        st.markdown("#### 🕐 Recent Activity (Last 5)")
+        
+        recent_logs = logs[:5]
+        for log in recent_logs:
+            status_emoji = {
+                'success': '✅',
+                'skipped': '⏭️',
+                'failed': '❌'
+            }.get(log.get('status', 'pending'), '❓')
+            
+            col_r1, col_r2, col_r3 = st.columns([2, 3, 1])
+            
+            with col_r1:
+                st.write(f"{status_emoji} **{log.get('status', 'N/A').upper()}**")
+            
+            with col_r2:
+                st.write(f"{log.get('from_email', 'Unknown')}")
+            
+            with col_r3:
+                st.caption(log.get('created_at', 'N/A')[:19])
+    else:
+        st.info("No scanning activity yet. Connect an email account to get started!")
+
+
+
+
+
+
 # ==================== PAGE: AI AGENTS ====================
 def page_agents():
     st.title("🤖 AI Agent Management")
@@ -9692,7 +10126,7 @@ def page_notifications():
 def page_settings():
     st.title("⚙️ Settings & Configuration")
     
-    tab1, tab2, tab3, tab4 = st.tabs(["Company Info", "Lead Sources", "Integrations", "API Keys"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Company Info", "Lead Sources", "Email Scanning", "Integrations", "API Keys"])
     
     with tab1:
         st.subheader("🏢 Company Information")
@@ -9742,6 +10176,9 @@ def page_settings():
         render_lead_sources_settings()
     
     with tab3:
+        render_email_scanning_settings()
+
+    with tab4:
         st.subheader("🔗 Integration Status")
         
         integrations = {
@@ -9767,7 +10204,7 @@ def page_settings():
         if health_resp:
             st.json(health_resp)
     
-    with tab4:
+    with tab5:
         st.subheader("🔑 API Keys & Webhooks")
         
         st.markdown("### Webhook URLs")

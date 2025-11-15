@@ -3889,6 +3889,7 @@ def render_sidebar():
             "🤖 AI Agents": "agents",
             "📞 Calling": "calling",
             "📅 Scheduled Calls": "scheduled_calls",
+            "📅 Calendar": "calendar",
             "💬 WhatsApp": "whatsapp",
             "🎯 Campaigns": "campaigns",
             "👨‍💼 Human Agents": "human_agents",
@@ -5539,28 +5540,45 @@ def render_email_scanning_settings():
                     with col_btn1:
                         if st.button("🔄 Scan Now", key=f"scan_{account['id']}", 
                                 help="Manually trigger email scan"):
-                            with st.spinner("Scanning inbox..."):
+                            with st.spinner("🔍 Scanning inbox with AI filter..."):
                                 try:
-                                    # Increase timeout for scan operation
                                     scan_resp = api_post(
                                         f"email/scan/{st.session_state.company_id}", 
                                         {},
-                                        timeout=60  # 60 second timeout
+                                        timeout=90  # Increased timeout for AI processing
                                     )
                                     
                                     if scan_resp and scan_resp.get('success'):
                                         scanned = scan_resp.get('scanned', 0)
+                                        results = scan_resp.get('results', [])
                                         errors = scan_resp.get('errors', [])
                                         
                                         if scanned > 0:
-                                            st.success(f"✅ Successfully processed {scanned} emails!")
+                                            # Count lead types
+                                            new_leads = sum(1 for r in results if r.get('is_new'))
+                                            high_priority = sum(1 for r in results if r.get('extracted_data', {}).get('urgency') == 'high')
                                             
-                                            if scan_resp.get('results'):
-                                                new_leads = sum(1 for r in scan_resp['results'] if r.get('is_new'))
-                                                if new_leads > 0:
-                                                    st.info(f"📊 {new_leads} new leads created!")
+                                            st.success(f"✅ Successfully processed {scanned} lead emails!")
+                                            
+                                            col_s1, col_s2, col_s3 = st.columns(3)
+                                            with col_s1:
+                                                st.metric("📊 New Leads", new_leads)
+                                            with col_s2:
+                                                st.metric("🔄 Updated Leads", scanned - new_leads)
+                                            with col_s3:
+                                                if high_priority > 0:
+                                                    st.metric("🔥 High Priority", high_priority, delta_color="inverse")
+                                            
+                                            # Show lead types breakdown
+                                            lead_types = {}
+                                            for r in results:
+                                                lead_type = r.get('extracted_data', {}).get('lead_type', 'unknown')
+                                                lead_types[lead_type] = lead_types.get(lead_type, 0) + 1
+                                            
+                                            if lead_types:
+                                                st.info(f"📋 Lead Types: {', '.join([f'{k.title()}: {v}' for k, v in lead_types.items()])}")
                                         else:
-                                            st.info("📭 No new unread emails found")
+                                            st.info("📭 No lead emails found. Newsletters and automated emails were filtered out.")
                                         
                                         if errors:
                                             with st.expander("⚠️ View Errors"):
@@ -6219,6 +6237,376 @@ def page_calling():
                         
                         if row.get('transcript'):
                             st.text_area("Transcript", row['transcript'], height=150, key=f"transcript_{idx}")
+
+
+
+
+
+def page_calendar():
+    """
+    Calendar Integration Management Page
+    """
+    st.title("📅 Calendar Integration")
+    
+    tab1, tab2, tab3 = st.tabs(["Calendar Status", "Create Event", "Upcoming Events"])
+    
+    # Tab 1: Calendar Status & OAuth Setup
+    with tab1:
+        st.subheader("📊 Connected Calendars")
+        
+        status_resp = api_get(f"calendar/status/{st.session_state.company_id}")
+        
+        if status_resp and status_resp.get('success'):
+            calendars = status_resp['data']
+            
+            if calendars:
+                for cal in calendars:
+                    with st.expander(f"📧 {cal['user_email']} ({cal['provider'].upper()})"):
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            status_icon = "🟢" if cal['is_active'] else "🔴"
+                            st.metric("Status", f"{status_icon} {'Active' if cal['is_active'] else 'Inactive'}")
+                        
+                        with col2:
+                            st.metric("📅 Calendar ID", cal.get('calendar_id', 'primary'))
+                        
+                        with col3:
+                            days_left = cal.get('days_until_expiry')
+                            if days_left is not None:
+                                # FIX: Convert to float
+                                try:
+                                    days_left = float(days_left)
+                                except (ValueError, TypeError):
+                                    days_left = None
+
+                                if days_left < 7:
+                                    st.metric("Token Expires", f"{days_left:.1f} days", delta_color="inverse")
+                                else:
+                                    st.metric("Token Valid", f"{days_left:.1f} days")
+                            else:
+                                st.metric("Status", "Active")
+                        
+                        st.info(f"🌐 **Timezone:** {cal.get('calendar_timezone', 'Asia/Kolkata')}")
+                        
+                        # Reconnect/Disconnect buttons
+                        col_btn1, col_btn2 = st.columns(2)
+                        
+                        with col_btn1:
+                            needs_reauth = cal.get('needs_reauth', False) or (days_left is not None and days_left < 7)
+                            
+                            if needs_reauth:
+                                st.warning("⚠️ **Re-authentication Required**")
+                            
+                            if st.button("🔄 Reconnect Calendar", key=f"reconnect_{cal['id']}"):
+                                with st.spinner("Initializing OAuth..."):
+                                    oauth_resp = api_get(
+                                        f"calendar/oauth/google/start?"
+                                        f"company_id={st.session_state.company_id}&"
+                                        f"user_email={cal['user_email']}"
+                                    )
+                                    
+                                    if oauth_resp and oauth_resp.get('success'):
+                                        auth_url = oauth_resp.get('auth_url')
+                                        
+                                        st.markdown(f"""
+                                        <div style="background: #e3f2fd; padding: 30px; border-radius: 15px; margin: 20px 0; text-align: center;">
+                                            <h3 style="color: #1976d2; margin-bottom: 20px;">🔐 Google Calendar OAuth Ready</h3>
+                                            <p style="color: #424242; margin-bottom: 25px; font-size: 16px;">
+                                                Click the button below to reconnect your calendar:
+                                            </p>
+                                            <a href="{auth_url}" target="_blank" style="
+                                                background: linear-gradient(135deg, #4285F4 0%, #34A853 100%);
+                                                color: white; 
+                                                padding: 18px 40px; 
+                                                border-radius: 10px; 
+                                                text-decoration: none; 
+                                                display: inline-block;
+                                                font-weight: bold;
+                                                font-size: 18px;
+                                                box-shadow: 0 4px 15px rgba(66, 133, 244, 0.4);
+                                            ">
+                                                🚀 Authorize Google Calendar
+                                            </a>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                    else:
+                                        st.error("❌ Failed to initialize OAuth")
+                        
+                        with col_btn2:
+                            if st.button("❌ Disconnect", key=f"disconnect_{cal['id']}"):
+                                if st.checkbox(f"✓ Confirm disconnection", key=f"confirm_disconnect_{cal['id']}"):
+                                    disconnect_resp = api_delete(f"calendar/disconnect/{cal['id']}")
+                                    
+                                    if disconnect_resp and disconnect_resp.get('success'):
+                                        st.success("✅ Calendar disconnected!")
+                                        time.sleep(1)
+                                        st.rerun()
+                                    else:
+                                        st.error("❌ Failed to disconnect")
+            else:
+                st.info("No calendars connected yet")
+        else:
+            st.warning("Unable to fetch calendar status")
+        
+        st.markdown("---")
+        st.markdown("### 🔗 Connect New Calendar")
+        
+        st.markdown("""
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                    color: white; padding: 20px; border-radius: 10px; margin: 20px 0;">
+            <h3 style="margin: 0 0 10px 0;">🚀 Sync Your Google Calendar</h3>
+            <p style="margin: 0; font-size: 14px;">
+                Automatically create calendar events for bookings and meetings.<br>
+                ✅ Google Meet links auto-generated<br>
+                ✅ Automatic reminders<br>
+                ✅ Prevent double-bookings
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        with st.form("connect_calendar"):
+            user_email = st.text_input(
+                "Your Email*",
+                placeholder="user@example.com",
+                help="The Google account email to connect"
+            )
+            
+            submitted = st.form_submit_button("🔗 Connect Google Calendar", use_container_width=True, type="primary")
+            
+            if submitted:
+                if not user_email:
+                    st.error("Email is required!")
+                else:
+                    with st.spinner("🔄 Initializing Google OAuth..."):
+                        oauth_resp = api_get(
+                            f"calendar/oauth/google/start?"
+                            f"company_id={st.session_state.company_id}&"
+                            f"user_email={user_email}"
+                        )
+                        
+                        if oauth_resp and oauth_resp.get('success'):
+                            auth_url = oauth_resp.get('auth_url')
+                            
+                            st.markdown(f"""
+                            <div style="background: #e3f2fd; padding: 30px; border-radius: 15px; margin: 20px 0; text-align: center;">
+                                <h3 style="color: #1976d2; margin-bottom: 20px;">🔐 Google Calendar OAuth Ready</h3>
+                                <p style="color: #424242; margin-bottom: 25px; font-size: 16px;">
+                                    Click the button below to authorize Google Calendar access:
+                                </p>
+                                <a href="{auth_url}" target="_blank" style="
+                                    background: linear-gradient(135deg, #4285F4 0%, #34A853 100%);
+                                    color: white; 
+                                    padding: 18px 40px; 
+                                    border-radius: 10px; 
+                                    text-decoration: none; 
+                                    display: inline-block;
+                                    font-weight: bold;
+                                    font-size: 18px;
+                                    box-shadow: 0 4px 15px rgba(66, 133, 244, 0.4);
+                                ">
+                                    🚀 Authorize Google Calendar
+                                </a>
+                                <p style="color: #666; margin-top: 20px; font-size: 14px;">
+                                    You'll be redirected to Google for secure authentication.<br>
+                                    After approval, your calendar will be ready to use!
+                                </p>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        else:
+                            st.error("❌ Failed to initialize OAuth")
+                            st.error("**Possible causes:**")
+                            st.markdown("""
+                            - GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET not configured
+                            - BASE_URL not set correctly
+                            - Google OAuth app not created in Google Cloud Console
+                            """)
+    
+    # Tab 2: Create Calendar Event
+    with tab2:
+        st.subheader("➕ Create Calendar Event")
+        
+        # Get connected calendars
+        status_resp = api_get(f"calendar/status/{st.session_state.company_id}")
+        
+        if not status_resp or not status_resp.get('success') or not status_resp['data']:
+            st.warning("⚠️ No calendars connected. Please connect a calendar in the 'Calendar Status' tab first.")
+            return
+        
+        calendars = status_resp['data']
+        active_calendars = [c for c in calendars if c['is_active']]
+        
+        if not active_calendars:
+            st.warning("⚠️ No active calendars found. Please reconnect your calendar.")
+            return
+        
+        # Calendar selection
+        cal_options = {f"{c['user_email']} ({c['provider']})": c['id'] for c in active_calendars}
+        
+        with st.form("create_calendar_event"):
+            selected_cal = st.selectbox("Select Calendar", list(cal_options.keys()))
+            calendar_config_id = cal_options[selected_cal]
+            
+            st.markdown("### 📋 Event Details")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                title = st.text_input("Event Title*", placeholder="Demo Session - Chess Coaching")
+                
+                # Lead selection (optional)
+                leads_resp = api_get(f"leads?company_id={st.session_state.company_id}&limit=100")
+                lead_options = {"None": None}
+                if leads_resp and leads_resp.get('success'):
+                    lead_options.update({
+                        f"{l['name']} ({l['phone_number']})": l['id'] 
+                        for l in leads_resp['data']
+                    })
+                
+                selected_lead = st.selectbox("Link to Lead (Optional)", list(lead_options.keys()))
+                lead_id = lead_options[selected_lead]
+            
+            with col2:
+                duration = st.number_input("Duration (minutes)", min_value=15, max_value=480, value=60, step=15)
+                
+                attendee_emails = st.text_area(
+                    "Attendee Emails (one per line)",
+                    placeholder="attendee1@example.com\nattendee2@example.com",
+                    height=100
+                )
+            
+            description = st.text_area(
+                "Description",
+                placeholder="Meeting agenda, notes, etc.",
+                height=100
+            )
+            
+            st.markdown("### 🕐 Schedule")
+            
+            col3, col4 = st.columns(2)
+            
+            with col3:
+                event_date = st.date_input("Date", value=datetime.now() + timedelta(days=1))
+            
+            with col4:
+                event_time = st.time_input("Time", value=datetime.now().replace(hour=10, minute=0).time())
+            
+            submitted = st.form_submit_button("📅 Create Event", use_container_width=True, type="primary")
+            
+            if submitted:
+                if not title:
+                    st.error("Event title is required!")
+                    return
+                
+                # Calculate start and end times
+                start_datetime = datetime.combine(event_date, event_time)
+                end_datetime = start_datetime + timedelta(minutes=duration)
+                
+                # Parse attendees
+                attendees = []
+                if attendee_emails:
+                    attendees = [email.strip() for email in attendee_emails.split('\n') if email.strip()]
+                
+                # Create event
+                event_data = {
+                    "calendar_config_id": calendar_config_id,
+                    "lead_id": lead_id,
+                    "title": title,
+                    "description": description,
+                    "start_time": start_datetime.isoformat(),
+                    "end_time": end_datetime.isoformat(),
+                    "attendees": attendees
+                }
+                
+                with st.spinner("Creating calendar event..."):
+                    result = api_post("calendar/create-event", event_data)
+                    
+                    if result and result.get('success'):
+                        event_info = result['data']
+                        
+                        st.success("✅ Calendar event created successfully!")
+                        
+                        col_success1, col_success2 = st.columns(2)
+                        
+                        with col_success1:
+                            st.info(f"**Event ID:** {event_info.get('event_id')}")
+                        
+                        with col_success2:
+                            if event_info.get('meeting_link'):
+                                st.markdown(f"**📹 [Join Google Meet]({event_info['meeting_link']})**")
+                        
+                        if event_info.get('calendar_link'):
+                            st.markdown(f"[📅 View in Google Calendar]({event_info['calendar_link']})")
+                        
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to create calendar event")
+                        if result:
+                            st.error(f"Error: {result.get('error', 'Unknown error')}")
+    
+    # Tab 3: Upcoming Events
+    with tab3:
+        st.subheader("📆 Upcoming Events")
+        
+        # This would require a new API endpoint to fetch calendar events
+        # For now, show placeholder
+        st.info("📌 **Feature:** View and manage upcoming calendar events")
+        st.markdown("""
+        **Coming Soon:**
+        - View all scheduled events
+        - Edit/cancel events
+        - Send reminders
+        - Sync status updates
+        """)
+        
+        # Placeholder for future implementation
+        with st.expander("📋 Sample Event"):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Title:** Demo Session")
+                st.write("**Lead:** John Doe")
+                st.write("**Date:** 2025-11-16 10:00 AM")
+            with col2:
+                st.write("**Duration:** 60 mins")
+                st.write("**Attendees:** 2")
+                st.markdown("[📹 Join Meet](#)")
+
+
+
+
+def check_calendar_availability(calendar_config_id: int, start_time: str, end_time: str) -> Optional[Dict]:
+    """
+    Check if a time slot is available in the calendar
+    
+    Args:
+        calendar_config_id: Calendar configuration ID
+        start_time: ISO format datetime string
+        end_time: ISO format datetime string
+    
+    Returns:
+        Dict with availability status or None if error
+    """
+    try:
+        data = {
+            "calendar_config_id": calendar_config_id,
+            "start_time": start_time,
+            "end_time": end_time
+        }
+        
+        response = api_post("calendar/check-availability", data)
+        
+        if response and response.get('success'):
+            return response['data']
+        else:
+            st.error("Failed to check availability")
+            return None
+    except Exception as e:
+        st.error(f"Error checking availability: {str(e)}")
+        return None
+
+
+
 
 # ==================== PAGE: SCHEDULED CALLS ====================
 def page_scheduled_calls():
@@ -7142,6 +7530,8 @@ def main():
             page_agents()
         elif page == 'calling':
             page_calling()
+        elif page == 'calendar':  # ← ADD THIS
+            page_calendar()
         elif page == 'scheduled_calls':
             page_scheduled_calls()
         elif page == 'whatsapp':

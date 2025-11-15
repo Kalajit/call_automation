@@ -197,6 +197,13 @@
 # - Geographic availability across Bangalore
 # - Flexibility with scheduling and age groups
 
+
+# BOOKING CAPABILITIES:
+# - When the customer wants to book/schedule a session, ask for their preferred date and time
+# - Extract the date/time from their response (e.g., "tomorrow at 3pm", "Monday at 10am")
+# - Confirm the booking and let them know they''ll receive an email confirmation
+# - If their preferred time is not available, offer alternative time slots
+
 # ## Response Refinement
 # - When discussing their chess background: "Your chess journey sounds fascinating. Could you tell me more about [specific aspect they mentioned]?"
 # - When explaining opportunities: "Let me paint a picture of what coaching with our partner schools looks like..."
@@ -26196,6 +26203,13 @@
 # - Language capabilities (English/Kannada/Hindi)
 # - Delivery location and logistics preferences
 
+
+# ## BOOKING CAPABILITIES:
+# - When the customer wants to book/schedule a session, ask for their preferred date and time
+# - Extract the date/time from their response (e.g., "tomorrow at 3pm", "Monday at 10am")
+# - Confirm the booking and let them know they''ll receive an email confirmation
+# - If their preferred time is not available, offer alternative time slots
+
 # ## Response Refinement
 # - When discussing needs: "Your setup sounds interesting. Could you share more about [specific need]?"
 # - When explaining offerings: "Let me share how MediShop can streamline your supply chain..."
@@ -26337,6 +26351,12 @@
 # - Contact details and availability
 # - Language capabilities (English/Kannada/Hindi)
 # - Accessibility to Bangalore facility
+
+# ## BOOKING CAPABILITIES:
+# - When the customer wants to book/schedule a session, ask for their preferred date and time
+# - Extract the date/time from their response (e.g., "tomorrow at 3pm", "Monday at 10am")
+# - Confirm the booking and let them know they''ll receive an email confirmation
+# - If their preferred time is not available, offer alternative time slots
 
 # ## Response Refinement
 # - When discussing needs: "I understand your concern. Could you share more about [specific need]?"
@@ -26481,6 +26501,13 @@
 # - Language capabilities and communication skills
 # - Geographic availability across Bangalore
 # - Flexibility with scheduling and age groups
+
+
+# ## BOOKING CAPABILITIES:
+# - When the customer wants to book/schedule a session, ask for their preferred date and time
+# - Extract the date/time from their response (e.g., "tomorrow at 3pm", "Monday at 10am")
+# - Confirm the booking and let them know they''ll receive an email confirmation
+# - If their preferred time is not available, offer alternative time slots
 
 # ## Response Refinement
 # - When discussing chess background: "Your chess journey sounds fascinating. Could you tell more about [specific aspect]?"
@@ -32646,6 +32673,7 @@ from email.mime.text import MIMEText
 from langdetect import detect
 from langdetect.lang_detect_exception import LangDetectException
 import websockets  
+import dateparser
 
 
 # Configure logging
@@ -32996,6 +33024,147 @@ async def update_lead_status(lead_id: int, status: str, last_contacted: datetime
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $3
         """, status, last_contacted, lead_id)
+
+
+
+
+
+async def create_calendar_appointment(
+    calendar_config_id: int,
+    lead_id: int,
+    title: str,
+    start_time: datetime,
+    duration_minutes: int = 60,
+    attendee_email: str = None,
+    description: str = None
+) -> Optional[Dict]:
+    """
+    Create calendar appointment via CRM API
+    """
+    try:
+        end_time = start_time + timedelta(minutes=duration_minutes)
+        
+        attendees = [attendee_email] if attendee_email else []
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{CRM_API_URL}/calendar/create-event",
+                json={
+                    "calendar_config_id": calendar_config_id,
+                    "lead_id": lead_id,
+                    "title": title,
+                    "description": description,
+                    "start_time": start_time.isoformat(),
+                    "end_time": end_time.isoformat(),
+                    "attendees": attendees
+                },
+                headers={"Authorization": f"Bearer {CRM_API_KEY}"}
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            logger.info(f"✅ Calendar event created: {result.get('data', {}).get('event_id')}")
+            return result.get('data')
+            
+    except Exception as e:
+        logger.error(f"Failed to create calendar event: {e}")
+        return None
+
+
+
+
+async def check_calendar_availability_for_call(
+    calendar_config_id: int,
+    proposed_time: datetime,
+    duration_minutes: int = 60
+) -> Dict:
+    """
+    Check if a time slot is available in the calendar
+    Returns: {"available": bool, "busy_slots": [], "alternative_slots": []}
+    """
+    try:
+        end_time = proposed_time + timedelta(minutes=duration_minutes)
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{CRM_API_URL}/calendar/check-availability",
+                json={
+                    "calendar_config_id": calendar_config_id,
+                    "start_time": proposed_time.isoformat(),
+                    "end_time": end_time.isoformat()
+                },
+                headers={"Authorization": f"Bearer {CRM_API_KEY}"}
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            return result.get('data', {})
+            
+    except Exception as e:
+        logger.error(f"Failed to check calendar availability: {e}")
+        return {"available": False, "error": str(e)}
+
+
+async def get_available_slots_for_call(
+    calendar_config_id: int,
+    start_date: datetime,
+    days_ahead: int = 7,
+    duration_minutes: int = 60
+) -> List[Dict]:
+    """
+    Get available time slots for next N days
+    """
+    try:
+        end_date = start_date + timedelta(days=days_ahead)
+        
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                f"{CRM_API_URL}/calendar/available-slots",
+                json={
+                    "calendar_config_id": calendar_config_id,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "duration_minutes": duration_minutes,
+                    "buffer_minutes": 15
+                },
+                headers={"Authorization": f"Bearer {CRM_API_KEY}"}
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            return result.get('data', {}).get('available_slots', [])
+            
+    except Exception as e:
+        logger.error(f"Failed to get available slots: {e}")
+        return []
+
+
+async def get_active_calendar_config(company_id: int) -> Optional[Dict]:
+    """
+    Get active calendar configuration for a company
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{CRM_API_URL}/calendar/active/{company_id}",
+                headers={"Authorization": f"Bearer {CRM_API_KEY}"}
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            if result.get('success'):
+                return result.get('data')
+            else:
+                logger.warning(f"No active calendar for company {company_id}")
+                return None
+            
+    except Exception as e:
+        logger.error(f"Failed to get active calendar: {e}")
+        return None
+
+
+
+
 
 async def get_pending_scheduled_calls() -> List[Dict]:
     """Fetch pending scheduled calls"""
@@ -34227,7 +34396,133 @@ class ProductionLangchainAgent(LangchainAgent):
                     CONVERSATION_STORE[conversation_id]['language'] = new_language
                 
                 return switch_msg_translated, False
+
+
             
+
+            # --------------------------------------------------
+            # Calendar booking detection and handling
+            # --------------------------------------------------
+            booking_keywords = [
+                'book', 'schedule', 'appointment', 'meeting', 'session',
+                'time', 'available', 'when', 'slot', 'calendar'
+            ]
+            
+            if any(keyword in human_input.lower() for keyword in booking_keywords):
+                logger.info(f"📅 Booking intent detected in conversation {conversation_id}")
+                
+                # Get company_id from conversation store
+                company_id = None
+                if conversation_id in CONVERSATION_STORE:
+                    company_id = CONVERSATION_STORE[conversation_id].get('company_id')
+                
+                if company_id:
+                    # Get active calendar config
+                    calendar_config = await get_active_calendar_config(company_id)
+                    
+                    if calendar_config:
+                        calendar_config_id = calendar_config['calendar_config_id']
+                        
+                        # Try to extract date/time from user input
+                        extracted_time = await self._extract_datetime_from_text(human_input)
+                        
+                        if extracted_time:
+                            # Check if that slot is available
+                            availability = await check_calendar_availability_for_call(
+                                calendar_config_id=calendar_config_id,
+                                proposed_time=extracted_time,
+                                duration_minutes=60
+                            )
+                            
+                            if availability.get('available'):
+                                # Book the appointment
+                                lead_id = CONVERSATION_STORE[conversation_id].get('lead_id')
+                                lead_name = CONVERSATION_STORE[conversation_id].get('name', 'Customer')
+                                lead_phone = CONVERSATION_STORE[conversation_id].get('to_phone')
+                                
+                                # Get lead email from database
+                                lead_email = await self._get_lead_email(lead_id)
+                                
+                                booking_result = await create_calendar_appointment(
+                                    calendar_config_id=calendar_config_id,
+                                    lead_id=lead_id,
+                                    title=f"Chess Coaching Session - {lead_name}",
+                                    start_time=extracted_time,
+                                    duration_minutes=60,
+                                    attendee_email=lead_email,
+                                    description=f"Session with {lead_name} ({lead_phone})"
+                                )
+                                
+                                if booking_result:
+                                    meeting_link = booking_result.get('meeting_link', '')
+                                    response_text = f"Perfect! I've booked your session for {extracted_time.strftime('%B %d at %I:%M %p')}. You'll receive a confirmation email with the Google Meet link shortly!"
+                                    
+                                    # Translate if needed
+                                    if self.current_language != 'en':
+                                        response_text = await self.translate_text(response_text, self.current_language)
+                                    
+                                    logger.info(f"✅ Booking confirmed for {lead_name} at {extracted_time}")
+                                    return response_text, False
+                                else:
+                                    error_msg = "I had trouble booking that. Let me check available slots for you."
+                                    if self.current_language != 'en':
+                                        error_msg = await self.translate_text(error_msg, self.current_language)
+                                    return error_msg, False
+                            else:
+                                # Slot not available, suggest alternatives
+                                slots = await get_available_slots_for_call(
+                                    calendar_config_id=calendar_config_id,
+                                    start_date=datetime.now(timezone.utc),
+                                    days_ahead=7,
+                                    duration_minutes=60
+                                )
+                                
+                                if slots:
+                                    # Suggest first 3 slots
+                                    suggestions = []
+                                    for slot in slots[:3]:
+                                        slot_time = datetime.fromisoformat(slot['start'].replace('Z', '+00:00'))
+                                        suggestions.append(slot_time.strftime('%B %d at %I:%M %p'))
+                                    
+                                    response_text = f"That time is not available. How about: {', '.join(suggestions)}?"
+                                    if self.current_language != 'en':
+                                        response_text = await self.translate_text(response_text, self.current_language)
+                                    
+                                    return response_text, False
+                                else:
+                                    no_slots_msg = "I don't see any available slots. Let me connect you with our team."
+                                    if self.current_language != 'en':
+                                        no_slots_msg = await self.translate_text(no_slots_msg, self.current_language)
+                                    return no_slots_msg, False
+                        else:
+                            # No specific time mentioned, offer to show available slots
+                            slots = await get_available_slots_for_call(
+                                calendar_config_id=calendar_config_id,
+                                start_date=datetime.now(timezone.utc),
+                                days_ahead=7,
+                                duration_minutes=60
+                            )
+                            
+                            if slots:
+                                suggestions = []
+                                for slot in slots[:5]:
+                                    slot_time = datetime.fromisoformat(slot['start'].replace('Z', '+00:00'))
+                                    suggestions.append(slot_time.strftime('%B %d at %I:%M %p'))
+                                
+                                response_text = f"I have these times available: {', '.join(suggestions)}. Which works best for you?"
+                                if self.current_language != 'en':
+                                    response_text = await self.translate_text(response_text, self.current_language)
+                                
+                                return response_text, False
+                    else:
+                        logger.warning(f"No calendar configured for company {company_id}")
+            
+            # --------------------------------------------------
+            # END OF CALENDAR SECTION
+            # --------------------------------------------------
+
+
+
             # Translate user input to English if needed
             english_input = human_input
             if self.current_language != 'en':
@@ -34256,6 +34551,77 @@ class ProductionLangchainAgent(LangchainAgent):
             if self.current_language != 'en':
                 error_msg = await self.translate_text(error_msg, self.current_language)
             return error_msg, False
+
+
+
+    async def _extract_datetime_from_text(self, text: str) -> Optional[datetime]:
+        """
+        Extract date and time from natural language text
+        Returns datetime object in UTC
+        """
+        try:
+            
+            # Use dateparser to extract datetime
+            parsed = dateparser.parse(
+                text,
+                settings={
+                    'TIMEZONE': 'Asia/Kolkata',
+                    'RETURN_AS_TIMEZONE_AWARE': True,
+                    'PREFER_DATES_FROM': 'future'
+                }
+            )
+            
+            if parsed:
+                # Convert to UTC
+                utc_time = parsed.astimezone(timezone.utc)
+                logger.info(f"Extracted datetime: {utc_time.isoformat()} from '{text}'")
+                return utc_time
+            
+        except Exception as e:
+            logger.debug(f"Could not extract datetime from '{text}': {e}")
+        
+        # Fallback: basic regex patterns
+        import re
+        
+        # Pattern: "tomorrow at 3pm", "monday at 10am"
+        patterns = [
+            r'(?:tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+at\s+(\d{1,2})\s*(?:am|pm)?',
+            r'(\d{1,2})\s*(?:am|pm)\s+(?:tomorrow|today)',
+            r'(?:at\s+)?(\d{1,2}):?(\d{2})?\s*(am|pm)?'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text.lower())
+            if match:
+                # Simple fallback: tomorrow at extracted hour
+                now = datetime.now(timezone.utc)
+                tomorrow = now + timedelta(days=1)
+                
+                hour = int(match.group(1))
+                if 'pm' in text.lower() and hour < 12:
+                    hour += 12
+                
+                proposed = tomorrow.replace(hour=hour, minute=0, second=0, microsecond=0)
+                logger.info(f"Basic extraction: {proposed.isoformat()} from '{text}'")
+                return proposed
+        
+        return None
+    
+    async def _get_lead_email(self, lead_id: int) -> Optional[str]:
+        """Get lead email from database"""
+        if not lead_id:
+            return None
+        
+        try:
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT email FROM leads WHERE id = $1",
+                    lead_id
+                )
+                return row['email'] if row else None
+        except Exception as e:
+            logger.error(f"Failed to get lead email: {e}")
+            return None
 
 
 

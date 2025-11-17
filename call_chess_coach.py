@@ -33056,7 +33056,8 @@ async def create_calendar_appointment(
                     "description": description,
                     "start_time": start_time.isoformat(),
                     "end_time": end_time.isoformat(),
-                    "attendees": attendees
+                    "attendees": attendees,
+                    "send_confirmation": True  # Enable auto email
                 },
                 headers={"Authorization": f"Bearer {CRM_API_KEY}"}
             )
@@ -33393,6 +33394,7 @@ async def translate_text_indictrans(text: str, target_lang: str, source_lang: st
     # LAST RESORT: Return original text
     # ========================================
     logger.warning(f"⚠️ Translation failed, returning original: {text[:50]}...")
+    
     return text
 
 
@@ -33796,6 +33798,92 @@ async def send_email_summary(to_email: str, subject: str, body: str):
     except Exception as e:
         logger.error(f"Failed to send email: {e}")
         METRICS["errors"]["email_failed"] += 1
+
+
+
+async def send_email_with_retry(
+    to_email: str, 
+    subject: str, 
+    body: str, 
+    company_id: int,
+    max_retries: int = 3
+) -> bool:
+    """
+    ✅ FIXED: Use company's email config from server.js flow
+    """
+    try:
+        # ✅ Get company email config (same as server.js does)
+        if not db_pool:
+            logger.error("Database pool not initialized")
+            return False
+        
+        async with db_pool.acquire() as conn:
+            email_config = await conn.fetchrow("""
+                SELECT 
+                    email_address,
+                    provider,
+                    oauth_access_token,
+                    oauth_refresh_token,
+                    oauth_token_expires_at
+                FROM email_configs
+                WHERE company_id = $1 AND is_active = TRUE
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, company_id)
+        
+        if not email_config:
+            logger.error(f"No active email config for company {company_id}")
+            return False
+        
+        # ✅ FIXED: Use CRM API to send email (reuses server.js logic)
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.post(
+                        f"{CRM_API_URL}/email/send",
+                        json={
+                            "company_id": company_id,
+                            "to_email": to_email,
+                            "subject": subject,
+                            "body": body,
+                            "from_config_id": email_config['id'] if 'id' in email_config else None
+                        }
+                    )
+                    
+                    if response.status_code == 200:
+                        logger.info(f"📧 Email sent successfully to {to_email} via CRM API")
+                        return True
+                    else:
+                        logger.warning(f"Email API returned {response.status_code}: {response.text}")
+                        
+            except Exception as e:
+                logger.error(f"Email attempt {attempt + 1} failed: {e}")
+                
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    # ✅ Log to email_queue for manual retry
+                    try:
+                        async with db_pool.acquire() as conn:
+                            await conn.execute("""
+                                INSERT INTO email_queue (
+                                    company_id, to_email, subject, body, 
+                                    status, error_message, retry_count
+                                )
+                                VALUES ($1, $2, $3, $4, 'failed', $5, $6)
+                            """, company_id, to_email, subject, body, str(e), attempt + 1)
+                    except Exception as db_error:
+                        logger.error(f"Failed to log email error: {db_error}")
+                    
+                    METRICS["errors"]["email_failed"] += 1
+                    return False
+        
+        return False
+        
+    except Exception as e:
+        logger.error(f"Email sending error: {e}", exc_info=True)
+        return False
+
 
 async def send_whatsapp_summary(to_phone: str, body: str):
     """Send WhatsApp summary via Twilio"""
@@ -34278,25 +34366,30 @@ class ProductionLangchainAgent(LangchainAgent):
                 self.detected_language_count.clear()  # Reset counter
                 return lang_code
         
-        # Automatic detection using FastText
-        detected = detect_language_fasttext(user_input)
-        if detected != self.current_language and detected in LANGUAGE_MAP:
-            # Increment counter for this language
-            self.detected_language_count[detected] += 1
-            
-            # Only switch if we've detected the same language multiple times
-            if self.detected_language_count[detected] >= self.language_detection_threshold:
-                logger.info(f"🔄 Auto-detected language switch: {self.current_language} → {detected} (confidence: {self.detected_language_count[detected]} messages)")
-                self.detected_language_count.clear()  # Reset counter
-                await self.save_language_to_db(detected)
-                return detected
+        try:
+            # Automatic detection using FastText
+            detected = detect_language_fasttext(user_input)
+            if detected != self.current_language and detected in LANGUAGE_MAP:
+                # Increment counter for this language
+                self.detected_language_count[detected] += 1
+                
+                # Only switch if we've detected the same language multiple times
+                if self.detected_language_count[detected] >= self.language_detection_threshold:
+                    logger.info(f"🔄 Auto-detected language switch: {self.current_language} → {detected} (confidence: {self.detected_language_count[detected]} messages)")
+                    self.detected_language_count.clear()  # Reset counter
+                    await self.save_language_to_db(detected)
+                    return detected
+                else:
+                    logger.debug(f"🔍 Detected {detected} ({self.detected_language_count[detected]}/{self.language_detection_threshold}), waiting for confirmation...")
             else:
-                logger.debug(f"🔍 Detected {detected} ({self.detected_language_count[detected]}/{self.language_detection_threshold}), waiting for confirmation...")
-        else:
-            # Reset counter if back to current language
-            if detected == self.current_language:
-                self.detected_language_count.clear()
-        
+                # Reset counter if back to current language
+                if detected == self.current_language:
+                    self.detected_language_count.clear()
+                # ... rest of logic
+        except Exception as e:
+            logger.warning(f"Language detection failed: {e}")
+            return None
+            
         return None
     
     async def translate_text(self, text: str, target_lang: str) -> str:
@@ -34332,8 +34425,8 @@ class ProductionLangchainAgent(LangchainAgent):
                 async with db_pool.acquire() as conn:
                     await conn.execute(
                         """UPDATE leads 
-                           SET preferred_language = $1, updated_at = CURRENT_TIMESTAMP 
-                           WHERE id = $2""",
+                        SET preferred_language = $1, updated_at = CURRENT_TIMESTAMP 
+                        WHERE id = $2""",
                         lang_code, self.lead_id
                     )
                     logger.info(f"✅ Updated lead {self.lead_id} language preference to {lang_code}")
@@ -34381,7 +34474,7 @@ class ProductionLangchainAgent(LangchainAgent):
                 return goodbye, True
             
             # Check for language switch request
-            new_language = self.detect_language_switch(human_input)
+            new_language = await self.detect_language_switch(human_input)
             if new_language and new_language != self.current_language:
                 self.current_language = new_language
                 await self.update_lead_language_preference(new_language)
@@ -34396,131 +34489,45 @@ class ProductionLangchainAgent(LangchainAgent):
                     CONVERSATION_STORE[conversation_id]['language'] = new_language
                 
                 return switch_msg_translated, False
-
-
             
 
-            # --------------------------------------------------
-            # Calendar booking detection and handling
-            # --------------------------------------------------
-            booking_keywords = [
-                'book', 'schedule', 'appointment', 'meeting', 'session',
-                'time', 'available', 'when', 'slot', 'calendar'
-            ]
+            # 🆕 FIXED: Booking Intent Detection with proper checks
+            booking_intent = await self.handle_booking_intent(human_input, conversation_id)
             
-            if any(keyword in human_input.lower() for keyword in booking_keywords):
-                logger.info(f"📅 Booking intent detected in conversation {conversation_id}")
+            # ✅ FIXED: Check if CONVERSATION_STORE exists globally
+            if booking_intent and conversation_id in CONVERSATION_STORE:
+                conv = CONVERSATION_STORE[conversation_id]
+                lead_id = conv.get('lead_id')
+                company_id = conv.get('company_id')
                 
-                # Get company_id from conversation store
-                company_id = None
-                if conversation_id in CONVERSATION_STORE:
-                    company_id = CONVERSATION_STORE[conversation_id].get('company_id')
-                
-                if company_id:
-                    # Get active calendar config
-                    calendar_config = await get_active_calendar_config(company_id)
-                    
-                    if calendar_config:
-                        calendar_config_id = calendar_config['calendar_config_id']
+                if lead_id and company_id:
+                    try:
+                        booking_result = await self.create_booking_for_lead(
+                            company_id=company_id,
+                            lead_id=lead_id,
+                            booking_data=booking_intent,
+                            conversation_id=conversation_id
+                        )
                         
-                        # Try to extract date/time from user input
-                        extracted_time = await self._extract_datetime_from_text(human_input)
-                        
-                        if extracted_time:
-                            # Check if that slot is available
-                            availability = await check_calendar_availability_for_call(
-                                calendar_config_id=calendar_config_id,
-                                proposed_time=extracted_time,
-                                duration_minutes=60
-                            )
+                        if booking_result and booking_result.get('success'):
+                            success_msg = f"Great! I've scheduled your {booking_intent.get('purpose', 'appointment')} for {booking_result.get('date_str', 'soon')}. You'll receive a confirmation email shortly."
                             
-                            if availability.get('available'):
-                                # Book the appointment
-                                lead_id = CONVERSATION_STORE[conversation_id].get('lead_id')
-                                lead_name = CONVERSATION_STORE[conversation_id].get('name', 'Customer')
-                                lead_phone = CONVERSATION_STORE[conversation_id].get('to_phone')
-                                
-                                # Get lead email from database
-                                lead_email = await self._get_lead_email(lead_id)
-                                
-                                booking_result = await create_calendar_appointment(
-                                    calendar_config_id=calendar_config_id,
-                                    lead_id=lead_id,
-                                    title=f"Chess Coaching Session - {lead_name}",
-                                    start_time=extracted_time,
-                                    duration_minutes=60,
-                                    attendee_email=lead_email,
-                                    description=f"Session with {lead_name} ({lead_phone})"
-                                )
-                                
-                                if booking_result:
-                                    meeting_link = booking_result.get('meeting_link', '')
-                                    response_text = f"Perfect! I've booked your session for {extracted_time.strftime('%B %d at %I:%M %p')}. You'll receive a confirmation email with the Google Meet link shortly!"
-                                    
-                                    # Translate if needed
-                                    if self.current_language != 'en':
-                                        response_text = await self.translate_text(response_text, self.current_language)
-                                    
-                                    logger.info(f"✅ Booking confirmed for {lead_name} at {extracted_time}")
-                                    return response_text, False
-                                else:
-                                    error_msg = "I had trouble booking that. Let me check available slots for you."
-                                    if self.current_language != 'en':
-                                        error_msg = await self.translate_text(error_msg, self.current_language)
-                                    return error_msg, False
-                            else:
-                                # Slot not available, suggest alternatives
-                                slots = await get_available_slots_for_call(
-                                    calendar_config_id=calendar_config_id,
-                                    start_date=datetime.now(timezone.utc),
-                                    days_ahead=7,
-                                    duration_minutes=60
-                                )
-                                
-                                if slots:
-                                    # Suggest first 3 slots
-                                    suggestions = []
-                                    for slot in slots[:3]:
-                                        slot_time = datetime.fromisoformat(slot['start'].replace('Z', '+00:00'))
-                                        suggestions.append(slot_time.strftime('%B %d at %I:%M %p'))
-                                    
-                                    response_text = f"That time is not available. How about: {', '.join(suggestions)}?"
-                                    if self.current_language != 'en':
-                                        response_text = await self.translate_text(response_text, self.current_language)
-                                    
-                                    return response_text, False
-                                else:
-                                    no_slots_msg = "I don't see any available slots. Let me connect you with our team."
-                                    if self.current_language != 'en':
-                                        no_slots_msg = await self.translate_text(no_slots_msg, self.current_language)
-                                    return no_slots_msg, False
+                            if self.current_language != 'en':
+                                success_msg = await self.translate_text(success_msg, self.current_language)
+                            
+                            return success_msg, False
                         else:
-                            # No specific time mentioned, offer to show available slots
-                            slots = await get_available_slots_for_call(
-                                calendar_config_id=calendar_config_id,
-                                start_date=datetime.now(timezone.utc),
-                                days_ahead=7,
-                                duration_minutes=60
-                            )
+                            fallback_msg = "I'd love to schedule that for you. Let me connect you with our team to find the best time."
+                            if self.current_language != 'en':
+                                fallback_msg = await self.translate_text(fallback_msg, self.current_language)
+                            return fallback_msg, False
                             
-                            if slots:
-                                suggestions = []
-                                for slot in slots[:5]:
-                                    slot_time = datetime.fromisoformat(slot['start'].replace('Z', '+00:00'))
-                                    suggestions.append(slot_time.strftime('%B %d at %I:%M %p'))
-                                
-                                response_text = f"I have these times available: {', '.join(suggestions)}. Which works best for you?"
-                                if self.current_language != 'en':
-                                    response_text = await self.translate_text(response_text, self.current_language)
-                                
-                                return response_text, False
-                    else:
-                        logger.warning(f"No calendar configured for company {company_id}")
-            
-            # --------------------------------------------------
-            # END OF CALENDAR SECTION
-            # --------------------------------------------------
-
+                    except Exception as booking_error:
+                        logger.error(f"Booking creation failed: {booking_error}")
+                        fallback_msg = "I'm having trouble accessing the calendar. Let me connect you with our team."
+                        if self.current_language != 'en':
+                            fallback_msg = await self.translate_text(fallback_msg, self.current_language)
+                        return fallback_msg, False
 
 
             # Translate user input to English if needed
@@ -34544,6 +34551,9 @@ class ProductionLangchainAgent(LangchainAgent):
                 return translated_response, should_end
             
             return response, should_end
+
+
+        
             
         except Exception as e:
             logger.error(f"Agent response error: {e}")
@@ -34580,8 +34590,7 @@ class ProductionLangchainAgent(LangchainAgent):
         except Exception as e:
             logger.debug(f"Could not extract datetime from '{text}': {e}")
         
-        # Fallback: basic regex patterns
-        import re
+      
         
         # Pattern: "tomorrow at 3pm", "monday at 10am"
         patterns = [
@@ -34599,7 +34608,7 @@ class ProductionLangchainAgent(LangchainAgent):
                 
                 hour = int(match.group(1))
                 if 'pm' in text.lower() and hour < 12:
-                    hour += 12
+                    hour += 12f
                 
                 proposed = tomorrow.replace(hour=hour, minute=0, second=0, microsecond=0)
                 logger.info(f"Basic extraction: {proposed.isoformat()} from '{text}'")
@@ -34624,6 +34633,158 @@ class ProductionLangchainAgent(LangchainAgent):
             return None
 
 
+    async def handle_booking_intent(self, user_input: str, conversation_id: str) -> Optional[Dict]:
+        """
+        Detect if user wants to book an appointment and extract details
+        """
+        booking_keywords = [
+            'book', 'schedule', 'appointment', 'meeting', 'demo', 'call back',
+            'book करना', 'मिलना', 'समय', 'appointment', 'ಸಭೆ', 'മീറ്റിംഗ്'
+        ]
+        
+        if not any(keyword in user_input.lower() for keyword in booking_keywords):
+            return None
+        
+        try:
+            # ✅ FIXED: Use the global llm chain properly
+            from langchain_core.prompts import PromptTemplate
+            from langchain_classic.chains import LLMChain
+            
+            booking_prompt = PromptTemplate(
+                input_variables=["user_input"],
+                template="""Extract booking details from this text. Return ONLY valid JSON with no extra text:
+    {{
+    "wants_booking": true,
+    "preferred_date": "YYYY-MM-DD or null",
+    "preferred_time": "HH:MM or null",
+    "duration_minutes": 30,
+    "purpose": "demo"
+    }}
+
+    User said: "{user_input}"
+
+    JSON:"""
+            )
+            llm = ChatGroq(model_name="llama-3.1-8b-instant", api_key=GROQ_API_KEY)
+            booking_chain = LLMChain(llm=llm, prompt=booking_prompt)
+            
+            # ✅ FIXED: Use ainvoke instead of predict
+            result = await booking_chain.ainvoke({"user_input": user_input})
+            result_text = result.get('text') if result else '{}'
+            if not result_text:
+                logger.warning("Empty result from booking chain")
+                return None
+            
+            # Extract JSON safely
+            start = result_text.find('{')
+            end = result_text.rfind('}') + 1
+            
+            if start == -1 or end <= start:
+                logger.warning(f"No JSON found in booking detection response")
+                return None
+            
+            # ✅ FIXED: Add JSON validation
+            try:
+                booking_data = json.loads(result_text[start:end])
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON from LLM: {e}")
+                return None
+            
+            if booking_data.get('wants_booking'):
+                return booking_data
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Booking intent detection failed: {e}", exc_info=True)
+            return None
+
+
+
+    async def create_booking_for_lead(
+        self,
+        company_id: int,
+        lead_id: int,
+        booking_data: Dict,
+        conversation_id: str
+    ) -> Optional[Dict]:
+        """
+        Create calendar booking and send confirmation email
+        """
+        try:
+            # Get active calendar config
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                calendar_response = await client.get(
+                    f"{CRM_API_URL}/calendar/active/{company_id}",
+                    headers={"Authorization": f"Bearer {CRM_API_KEY}"}
+                )
+                
+                if calendar_response.status_code != 200:
+                    logger.warning(f"No active calendar for company {company_id}")
+                    return None
+                
+                calendar_config = calendar_response.json()['data']
+                calendar_config_id = calendar_config['calendar_config_id']
+            
+            # Get lead details
+            async with db_pool.acquire() as conn:
+                lead = await conn.fetchrow(
+                    "SELECT name, email, phone_number FROM leads WHERE id = $1",
+                    lead_id
+                )
+            
+            if not lead:
+                return None
+            
+            # Parse booking time
+            from datetime import datetime, timedelta, timezone
+            
+            preferred_date = booking_data.get('preferred_date')
+            preferred_time = booking_data.get('preferred_time')
+            
+            # Default to next business day at 10 AM if not specified
+            if not preferred_date:
+                start_time = datetime.now(timezone.utc) + timedelta(days=1)
+                start_time = start_time.replace(hour=10, minute=0, second=0, microsecond=0)
+            else:
+                start_time = datetime.fromisoformat(preferred_date)
+                if preferred_time:
+                    hour, minute = map(int, preferred_time.split(':'))
+                    start_time = start_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                else:
+                    start_time = start_time.replace(hour=10, minute=0, second=0, microsecond=0)
+            
+            duration = booking_data.get('duration_minutes', 60)
+            purpose = booking_data.get('purpose', 'consultation')
+            
+            # Create calendar event
+            event_result = await create_calendar_appointment(
+                calendar_config_id=calendar_config_id,
+                lead_id=lead_id,
+                title=f"{purpose.title()} with {lead['name'] or 'Customer'}",
+                start_time=start_time,
+                duration_minutes=duration,
+                attendee_email=lead['email'],
+                description=f"Booked via AI call. Conversation ID: {conversation_id}"
+            )
+            
+            if event_result:
+                logger.info(f"✅ Booking created for lead {lead_id}: {event_result['event_id']}")
+                
+                date_str = start_time.strftime("%B %d, %Y at %I:%M %p")
+                
+                return {
+                    'success': True,  # ✅ Add this
+                    'event_id': event_result['event_id'],
+                    'meeting_link': event_result.get('meeting_link'),
+                    'date_str': date_str
+                }
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to create booking: {e}")
+            return None
 
 
 
@@ -34858,6 +35019,15 @@ async def make_outbound_call(
             
             # Prepare initial message
             initial_msg = agent_cfg["initial_message"].replace("{{name}}", name or "there")
+
+            # 🆕 UPDATED: Get voice from agent config
+            agent_voice = agent_cfg.get("voice", "Brian")
+            
+            # Validate voice
+            AVAILABLE_VOICES = ["Raveena", "Aditi", "Brian", "Matthew"]
+            if agent_voice not in AVAILABLE_VOICES:
+                logger.warning(f"Invalid voice '{agent_voice}', defaulting to Brian")
+                agent_voice = "Brian"
             
             # ✅ DETECT PROVIDER: Twilio OAuth or SIP
             sip_provider = agent_instance.get('sip_provider', 'twilio')

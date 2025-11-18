@@ -34608,7 +34608,7 @@ class ProductionLangchainAgent(LangchainAgent):
                 
                 hour = int(match.group(1))
                 if 'pm' in text.lower() and hour < 12:
-                    hour += 12f
+                    hour += 12
                 
                 proposed = tomorrow.replace(hour=hour, minute=0, second=0, microsecond=0)
                 logger.info(f"Basic extraction: {proposed.isoformat()} from '{text}'")

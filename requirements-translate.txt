@@ -7,6 +7,9 @@ uvicorn[standard]
 sentencepiece
 sacremoses
 indic-nlp-library
+transformers
+accelerate
+# torch==2.4.1+cpu --index-url https://download.pytorch.org/whl/cpu
 CTranslate2
 
 huggingface-hub

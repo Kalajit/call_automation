@@ -13,15 +13,40 @@ COPY requirements-translate.txt .
 RUN pip install --no-cache-dir \
     --timeout=600 \
     --retries=10 \
+    torch==2.3.1+cpu -f https://download.pytorch.org/whl/torch_stable.html \
     -r requirements-translate.txt
+
+
+RUN pip install --no-cache-dir \
+    --timeout=600 \
+    --retries=10 \
+    fastapi uvicorn[standard] pydantic==2.5.3 python-dotenv
 
 # Install CPU-only PyTorch from official index
 RUN pip install --no-cache-dir \
-    torch==2.4.1+cpu \
-    torchvision==0.19.1+cpu \
-    torchaudio==2.4.1+cpu \
+    torch==2.3.1+cpu \
+    torchvision==0.18.1+cpu \
+    torchaudio==2.3.1+cpu \
     --index-url https://download.pytorch.org/whl/cpu
 
+
+
+# Install remaining dependencies
+RUN pip install --no-cache-dir \
+    sentencepiece \
+    sacremoses \
+    indic-nlp-library \
+    CTranslate2 \
+    huggingface-hub \
+    tqdm \
+    deepl==1.17.0 \
+    httpx==0.26.0
+
+
+
+
+# Create models directory
+RUN mkdir -p /app/models
 # Copy only the script
 COPY translate_api.py .
 

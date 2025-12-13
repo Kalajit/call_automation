@@ -82,3 +82,34 @@ required_vars = [
 
 if not all(required_vars):
     raise ValueError("Missing required environment variables")
+
+
+
+
+
+
+# ============================================
+# SECURITY CONFIGURATION
+# ============================================
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")  # Same secret as Node.js server
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", 24))
+
+# API Key for service-to-service authentication (backup method)
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY")
+
+# Rate limiting
+RATE_LIMIT_ENABLED = os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true"
+RATE_LIMIT_CALLS = int(os.getenv("RATE_LIMIT_CALLS", 100))
+RATE_LIMIT_PERIOD = int(os.getenv("RATE_LIMIT_PERIOD", 3600))  # seconds
+
+# Security headers
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001").split(",")
+REQUIRE_HTTPS = os.getenv("REQUIRE_HTTPS", "false").lower() == "true"
+
+# Webhook security
+TWILIO_WEBHOOK_SECRET = os.getenv("TWILIO_WEBHOOK_SECRET")  # Optional: Twilio signature validation
+
+# Add validation
+if not JWT_SECRET_KEY:
+    raise ValueError("JWT_SECRET_KEY is required for authentication")

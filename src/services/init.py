@@ -19,3 +19,12 @@ from .notifications import (
     send_email_with_retry,
     send_whatsapp_summary
 )
+
+from .multilingual_service import (
+    get_multilingual_service,
+    translate_text_indictrans,
+    detect_language_fasttext,
+    SUPPORTED_LANGUAGES,
+    LANGUAGE_KEYWORDS,
+    MultilingualService
+)
